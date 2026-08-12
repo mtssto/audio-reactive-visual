@@ -14,8 +14,19 @@ export type HandTip = {
   speed: number;
 };
 
+/** One tracked hand with gesture strengths for installation verbs. */
+export type TrackedHand = {
+  id: string;
+  index: HandTip;
+  thumb: HandTip;
+  palm: HandTip;
+  /** 0 open → 1 pinched */
+  pinchStrength: number;
+};
+
 export type HandFrame = {
   tips: HandTip[];
+  hands: TrackedHand[];
   pinchStrength: number;
   present: boolean;
 };
@@ -80,17 +91,18 @@ export class HandTracker {
       video.readyState < 2 ||
       video.videoWidth === 0
     ) {
-      return { tips: [], pinchStrength: 0, present: false };
+      return { tips: [], hands: [], pinchStrength: 0, present: false };
     }
 
     let result;
     try {
       result = this.landmarker.detectForVideo(video, performance.now());
     } catch {
-      return { tips: [], pinchStrength: 0, present: false };
+      return { tips: [], hands: [], pinchStrength: 0, present: false };
     }
 
     const tips: HandTip[] = [];
+    const tracked: TrackedHand[] = [];
     let pinchStrength = 0;
 
     const hands = result.landmarks ?? [];
@@ -106,14 +118,24 @@ export class HandTracker {
 
       tips.push(wrist, thumb, index, middle, palm);
 
-      const pinch = Math.hypot(thumb.x - index.x, thumb.y - index.y);
-      pinchStrength = Math.max(pinchStrength, 1 - Math.min(1, pinch / 0.12));
+      const pinchDist = Math.hypot(thumb.x - index.x, thumb.y - index.y);
+      const handPinch = 1 - Math.min(1, pinchDist / 0.12);
+      pinchStrength = Math.max(pinchStrength, handPinch);
+
+      tracked.push({
+        id: `h${h}`,
+        index,
+        thumb,
+        palm,
+        pinchStrength: handPinch,
+      });
     }
 
     return {
       tips,
+      hands: tracked,
       pinchStrength,
-      present: tips.length > 0,
+      present: tracked.length > 0,
     };
   }
 

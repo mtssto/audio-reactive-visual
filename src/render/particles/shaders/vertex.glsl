@@ -1,5 +1,7 @@
 varying float vDistance;
 varying float vRipple;
+varying vec3 vColor;
+varying float vImageMode;
 
 uniform float time;
 uniform float offsetSize;
@@ -8,11 +10,19 @@ uniform float offsetGain;
 uniform float amplitude;
 uniform float frequency;
 uniform float maxDistance;
+/** 0 = Codrops mesh, 1 = image particle cloud */
+uniform float uImageMode;
+/** 0–1 disintegration (image mode): home → curl dust */
+uniform float uBreak;
+
+attribute vec3 color;
 
 uniform vec2 uTouchNdc[4];
 uniform float uTouchStrength[4];
 uniform float uTouchAge[4];
-uniform float uTouchRadius;
+uniform float uTouchRadius[4];
+/** 0 = scatter, 1 = wind, 2 = gather */
+uniform float uTouchMode[4];
 
 vec3 mod289(vec3 x){
   return x-floor(x*(1./289.))*289.;
@@ -83,12 +93,32 @@ vec3 curl(float x,float y,float z) {
 }
 
 void main() {
-  vec3 newpos = position;
-  vec3 target = position + (normal*.1) + curl(newpos.x * frequency, newpos.y * frequency, newpos.z * frequency) * amplitude;
+  vec3 newpos;
+  float d;
 
-  float d = length(newpos - target) / maxDistance;
-  newpos = mix(position, target, pow(d, 4.));
-  newpos.z += sin(time) * (.1 * offsetGain);
+  if (uImageMode > 0.5) {
+    vec3 home = position;
+    float brk = clamp(uBreak, 0., 1.);
+    // Near-zero idle drift so the photo reads sharp at rest
+    float breath = 0.008 * (1. - brk);
+    vec3 curlOff = curl(
+      home.x * frequency,
+      home.y * frequency,
+      home.z * frequency + color.r * 2.
+    );
+    // Stronger outward drift as break rises (photo → dust)
+    vec3 dust = home + curlOff * amplitude * (0.55 + brk * 2.4);
+    dust.z += curlOff.z * amplitude * brk * 3.2;
+    newpos = mix(home + curlOff * breath, dust, brk);
+    d = length(newpos - home) / max(maxDistance, 0.001);
+    vColor = color;
+  } else {
+    vec3 target = position + (normal*.1) + curl(position.x * frequency, position.y * frequency, position.z * frequency) * amplitude;
+    d = length(position - target) / maxDistance;
+    newpos = mix(position, target, pow(d, 4.));
+    newpos.z += sin(time) * (.1 * offsetGain);
+    vColor = vec3(1.);
+  }
 
   vec4 mvPosition = modelViewMatrix * vec4(newpos, 1.);
   vec4 clip = projectionMatrix * mvPosition;
@@ -96,34 +126,60 @@ void main() {
 
   float scatterBoost = 0.;
   float ripple = 0.;
-  float radius = max(uTouchRadius, 0.02);
+  // Idle touch influence stays mild so formed photo isn't constantly shredded
+  float touchBreak = uImageMode > 0.5 ? (0.22 + clamp(uBreak, 0., 1.) * 1.05) : 1.;
 
   for (int i = 0; i < 4; i++) {
     float str = uTouchStrength[i];
     if (str < 0.001) continue;
 
+    float radius = max(uTouchRadius[i], 0.02);
+    float mode = uTouchMode[i];
     vec2 delta = ndc - uTouchNdc[i];
     float dist = length(delta);
     float falloff = exp(-(dist * dist) / (radius * radius));
     float ageFade = exp(-uTouchAge[i] * 2.2);
-    float impulse = str * falloff * ageFade;
+    float impulse = str * falloff * ageFade * touchBreak;
 
-    // Expanding ripple ring
+    // Expanding ripple ring (stronger for scatter taps)
     float ring = abs(dist - uTouchAge[i] * 0.55);
     float ringPulse = exp(-(ring * ring) / 0.004) * str * ageFade;
 
     if (dist > 0.0001) {
       vec2 dir = delta / dist;
-      mvPosition.xy += dir * impulse * 1.35;
+      if (mode < 0.5) {
+        // Index scatter — tight outward ripple
+        mvPosition.xy += dir * impulse * 1.55;
+        mvPosition.z += impulse * (uImageMode > 0.5 ? 1.8 : 0.);
+        scatterBoost += impulse;
+        ripple += ringPulse + impulse * 0.4;
+      } else if (mode < 1.5) {
+        // Palm wind — wide soft push
+        mvPosition.xy += dir * impulse * 0.52;
+        scatterBoost += impulse * 0.35;
+        ripple += impulse * 0.18;
+      } else {
+        // Pinch gather — pull inward + mild compress glow
+        mvPosition.xy -= dir * impulse * 1.15;
+        scatterBoost += impulse * 0.25;
+        ripple += impulse * 0.55;
+      }
+    } else if (mode >= 1.5) {
+      scatterBoost += impulse * 0.2;
+      ripple += impulse * 0.4;
     }
-
-    scatterBoost += impulse;
-    ripple += ringPulse + impulse * 0.35;
   }
 
-  gl_PointSize = (size + (pow(d,3.) * offsetSize) * (1./-mvPosition.z)) * (1. + scatterBoost * 2.4);
+  float sizeBase = size + (pow(d,3.) * offsetSize) * (1./-mvPosition.z);
+  if (uImageMode > 0.5) {
+    // Dense stipple: small points with slight overlap (~4–9px at typical framing)
+    float z = max(0.001, -mvPosition.z);
+    sizeBase = max(1.0, size * 165. / z) + offsetSize * 0.05 * d;
+  }
+  gl_PointSize = sizeBase * (1. + scatterBoost * 2.4);
   gl_Position = projectionMatrix * mvPosition;
 
   vDistance = d;
   vRipple = clamp(ripple, 0., 2.);
+  vImageMode = uImageMode;
 }
