@@ -37,6 +37,21 @@ type ParticleUniforms = {
 
 export type ParticleFieldMode = 'mesh' | 'image';
 
+type StoredImageSample = {
+  positions: Float32Array;
+  colors: Float32Array;
+  seeds: Float32Array;
+  halfWidth: number;
+  halfHeight: number;
+  count: number;
+};
+
+type MorphPhase = 'idle' | 'break' | 'reform';
+
+const MAX_IMAGE_PLAYLIST = 10;
+/** Default seconds between auto image advances. */
+const DEFAULT_AUTO_ADVANCE_SEC = 8;
+
 /**
  * Codrops-style reactive particle cloud with presence + hand verbs,
  * plus an Image mode that samples a photo into a disintegrating field.
@@ -63,13 +78,16 @@ export class ReactiveParticleField extends THREE.Object3D {
   private hasImage = false;
   private breakAmount = 0;
   private lastLoudness = 0;
-  private lastImageSample: {
-    positions: Float32Array;
-    colors: Float32Array;
-    seeds: Float32Array;
-    halfWidth: number;
-    halfHeight: number;
-  } | null = null;
+  private lastImageSample: StoredImageSample | null = null;
+
+  /** Sampled image playlist (capped); active index is playlistIndex. */
+  private playlist: StoredImageSample[] = [];
+  private playlistIndex = 0;
+  private autoAdvanceSec = DEFAULT_AUTO_ADVANCE_SEC;
+  private autoAdvanceTimer = 0;
+  private morphPhase: MorphPhase = 'idle';
+  private morphForce = 0;
+  private pendingPlaylistIndex: number | null = null;
 
   constructor() {
     super();
@@ -133,6 +151,27 @@ export class ReactiveParticleField extends THREE.Object3D {
 
   get breakLevel(): number {
     return this.breakAmount;
+  }
+
+  get imagePlaylistCount(): number {
+    return this.playlist.length;
+  }
+
+  /** 1-based index for UI; 0 when empty. */
+  get imagePlaylistIndex(): number {
+    return this.playlist.length === 0 ? 0 : this.playlistIndex + 1;
+  }
+
+  get isMorphing(): boolean {
+    return this.morphPhase !== 'idle';
+  }
+
+  get autoAdvanceSeconds(): number {
+    return this.autoAdvanceSec;
+  }
+
+  setAutoAdvanceSeconds(seconds: number): void {
+    this.autoAdvanceSec = THREE.MathUtils.clamp(seconds, 4, 30);
   }
 
   /**
@@ -216,17 +255,67 @@ export class ReactiveParticleField extends THREE.Object3D {
     this.touches.releaseExcept(keep);
   }
 
-  /** Load PNG/JPG (or similar) and switch into Image mode. */
+  /** Load PNG/JPG (or similar), append to playlist, and show it. */
   async loadImage(file: File): Promise<number> {
     const img = await loadImageFromFile(file);
-    return this.applyImageSource(img);
+    return this.applyImageSource(img, { activate: true });
+  }
+
+  /**
+   * Decode and append one or more images. Activates the first newly added
+   * image when the playlist was empty, or when `activateFirst` is true.
+   */
+  async loadImages(
+    files: File[],
+    opts: { activateFirst?: boolean } = {},
+  ): Promise<number> {
+    const images = files.filter((f) => f.type.startsWith('image/'));
+    if (images.length === 0) return 0;
+
+    const wasEmpty = this.playlist.length === 0;
+    const activateFirst = opts.activateFirst ?? wasEmpty;
+    const startIndex = this.playlist.length;
+    let added = 0;
+
+    for (const file of images) {
+      try {
+        const img = await loadImageFromFile(file);
+        this.applyImageSource(img, { activate: false });
+        added += 1;
+      } catch {
+        /* skip bad file */
+      }
+    }
+
+    if (added === 0) return 0;
+
+    if (wasEmpty || activateFirst) {
+      // Show first of this batch (or only entry if empty)
+      const target = wasEmpty ? 0 : startIndex;
+      if (!this.hasImage || wasEmpty) {
+        this.playlistIndex = target;
+        this.lastImageSample = this.playlist[target]!;
+        this.hasImage = true;
+        this.cancelMorph();
+        this.showImageCloud(true);
+        this.autoAdvanceTimer = 0;
+      } else if (target !== this.playlistIndex) {
+        this.requestImageIndex(target);
+      }
+    }
+
+    return added;
   }
 
   /** Apply an already-decoded image / canvas / video frame as particles. */
-  applyImageSource(source: CanvasImageSource): number {
+  applyImageSource(
+    source: CanvasImageSource,
+    opts: { activate?: boolean } = {},
+  ): number {
+    const activate = opts.activate ?? true;
     const sample = sampleImageToParticles(source, {
-      maxSide: 256,
-      maxParticles: 36000,
+      maxSide: 320,
+      maxParticles: 52000,
       planeHalfWidth: 5.2,
       planeMaxHalfHeight: 3.85,
       skipWhiteAbove: 1,
@@ -234,6 +323,17 @@ export class ReactiveParticleField extends THREE.Object3D {
     if (sample.count < 8) {
       throw new Error('Image produced too few particles');
     }
+
+    const stored: StoredImageSample = {
+      positions: sample.positions.slice(),
+      colors: sample.colors.slice(),
+      seeds: sample.seeds.slice(),
+      halfWidth: sample.halfWidth,
+      halfHeight: sample.halfHeight,
+      count: sample.count,
+    };
+
+    this.pushPlaylistEntry(stored);
 
     this.preset = getPreset('image');
     this.uniforms.startColor.value.set(this.preset.startColor);
@@ -243,16 +343,49 @@ export class ReactiveParticleField extends THREE.Object3D {
     this.material.transparent = true;
     this.material.needsUpdate = true;
 
-    this.lastImageSample = {
-      positions: sample.positions.slice(),
-      colors: sample.colors.slice(),
-      seeds: sample.seeds.slice(),
-      halfWidth: sample.halfWidth,
-      halfHeight: sample.halfHeight,
-    };
-    this.hasImage = true;
-    this.showImageCloud(true);
+    if (activate) {
+      this.playlistIndex = this.playlist.length - 1;
+      this.lastImageSample = stored;
+      this.hasImage = true;
+      this.cancelMorph();
+      this.showImageCloud(true);
+      this.autoAdvanceTimer = 0;
+    }
+
     return sample.count;
+  }
+
+  nextImage(): boolean {
+    if (this.playlist.length < 2) return false;
+    const next = (this.playlistIndex + 1) % this.playlist.length;
+    return this.requestImageIndex(next);
+  }
+
+  prevImage(): boolean {
+    if (this.playlist.length < 2) return false;
+    const prev =
+      (this.playlistIndex - 1 + this.playlist.length) % this.playlist.length;
+    return this.requestImageIndex(prev);
+  }
+
+  /** Begin a smooth disintegrate → swap → reform to playlist index. */
+  requestImageIndex(index: number): boolean {
+    if (
+      index < 0 ||
+      index >= this.playlist.length ||
+      index === this.playlistIndex
+    ) {
+      return false;
+    }
+    if (this.morphPhase !== 'idle') {
+      // Queue latest target while current morph finishes
+      this.pendingPlaylistIndex = index;
+      return true;
+    }
+    this.pendingPlaylistIndex = index;
+    this.morphPhase = 'break';
+    this.autoAdvanceTimer = 0;
+    return true;
   }
 
   remix(): void {
@@ -315,34 +448,60 @@ export class ReactiveParticleField extends THREE.Object3D {
     );
 
     if (this.mode === 'image') {
-      // Stay mostly formed at rest; presence/mic/touch raise break to disintegrate.
-      // Soften presence so merely standing in frame doesn't keep the photo dusty.
-      const presenceBreak = Math.max(0, e - 0.12) * 0.32;
+      this.updateImageMorph(dt);
+
+      // Stay mostly formed at rest; presence/mic/touch raise break gently.
+      const presenceBreak = Math.max(0, e - 0.18) * 0.22;
       const breakTarget = THREE.MathUtils.clamp(
-        presenceBreak + loudness * 0.52 + touchEnergy * 0.78,
+        presenceBreak + loudness * 0.32 + touchEnergy * 0.48,
         0,
         1,
       );
-      const breakLerp = breakTarget > this.breakAmount ? dt * 3.0 : dt * 1.85;
-      this.breakAmount += (breakTarget - this.breakAmount) * Math.min(1, breakLerp);
-      this.uniforms.uBreak.value = this.breakAmount;
+      // Slow break / reform ramps — less snappy than mesh modes
+      const breakLerp = breakTarget > this.breakAmount ? dt * 1.15 : dt * 0.85;
+      this.breakAmount +=
+        (breakTarget - this.breakAmount) * Math.min(1, breakLerp);
+
+      const displayBreak = Math.max(this.breakAmount, this.morphForce);
+      this.uniforms.uBreak.value = displayBreak;
       this.spinRate = 0;
-      sizeMul = THREE.MathUtils.lerp(1.0, 1.08, e) * p.sizeScale;
-      // Amplitude only ramps with break so idle stays pinned to home positions
-      const dustAmp = 0.55 + this.breakAmount * 1.35;
-      amplitude = THREE.MathUtils.lerp(0.08, dustAmp, this.breakAmount);
-      timeDrive = THREE.MathUtils.lerp(0.06, 0.3, Math.max(e * 0.5, this.breakAmount));
+      sizeMul = THREE.MathUtils.lerp(1.0, 1.05, e) * p.sizeScale;
+      // Soft curl only while broken — idle stays pinned to home
+      const dustAmp = 0.32 + displayBreak * 0.95;
+      amplitude = THREE.MathUtils.lerp(0.04, dustAmp, displayBreak);
+      timeDrive = THREE.MathUtils.lerp(
+        0.04,
+        0.18,
+        Math.max(e * 0.35, displayBreak),
+      );
+
+      if (
+        this.morphPhase === 'idle' &&
+        this.playlist.length > 1 &&
+        this.autoAdvanceSec > 0
+      ) {
+        this.autoAdvanceTimer += dt;
+        if (this.autoAdvanceTimer >= this.autoAdvanceSec) {
+          this.autoAdvanceTimer = 0;
+          this.nextImage();
+        }
+      }
     } else {
       this.breakAmount *= Math.exp(-dt * 4);
       this.uniforms.uBreak.value = 0;
+      this.morphForce = 0;
+      this.morphPhase = 'idle';
     }
 
     const freqTarget =
       this.mode === 'image'
-        ? this.baseFrequency + this.breakAmount * 0.85 + gather * 0.4
+        ? this.baseFrequency +
+          Math.max(this.breakAmount, this.morphForce) * 0.55 +
+          gather * 0.25
         : this.baseFrequency + gather * 1.35;
     this.uniforms.frequency.value +=
-      (freqTarget - this.uniforms.frequency.value) * Math.min(1, dt * 5);
+      (freqTarget - this.uniforms.frequency.value) *
+      Math.min(1, dt * (this.mode === 'image' ? 2.2 : 5));
 
     this.uniforms.amplitude.value = amplitude;
     this.uniforms.size.value = this.baseSize * sizeMul;
@@ -368,6 +527,97 @@ export class ReactiveParticleField extends THREE.Object3D {
     }
   }
 
+  private pushPlaylistEntry(entry: StoredImageSample): void {
+    this.playlist.push(entry);
+    while (this.playlist.length > MAX_IMAGE_PLAYLIST) {
+      // Drop oldest non-active entry so the visible cloud stays valid
+      let removeAt = -1;
+      for (let i = 0; i < this.playlist.length - 1; i++) {
+        if (i !== this.playlistIndex) {
+          removeAt = i;
+          break;
+        }
+      }
+      if (removeAt < 0) removeAt = 0;
+      this.playlist.splice(removeAt, 1);
+      if (removeAt < this.playlistIndex) {
+        this.playlistIndex = Math.max(0, this.playlistIndex - 1);
+      }
+      if (this.pendingPlaylistIndex != null) {
+        if (removeAt === this.pendingPlaylistIndex) {
+          this.pendingPlaylistIndex = this.playlistIndex;
+        } else if (removeAt < this.pendingPlaylistIndex) {
+          this.pendingPlaylistIndex -= 1;
+        }
+      }
+    }
+  }
+
+  private cancelMorph(): void {
+    this.morphPhase = 'idle';
+    this.morphForce = 0;
+    this.pendingPlaylistIndex = null;
+  }
+
+  private updateImageMorph(dt: number): void {
+    if (this.morphPhase === 'idle') return;
+
+    if (this.morphPhase === 'break') {
+      // ~1.6s to fully dust out
+      this.morphForce = Math.min(1, this.morphForce + dt * 0.62);
+      if (this.morphForce >= 0.92) {
+        const target = this.pendingPlaylistIndex;
+        if (target != null && target >= 0 && target < this.playlist.length) {
+          this.swapToPlaylistIndex(target);
+        }
+        this.pendingPlaylistIndex = null;
+        this.morphPhase = 'reform';
+      }
+      return;
+    }
+
+    if (this.morphPhase === 'reform') {
+      // ~2.2s gentle reform
+      this.morphForce = Math.max(0, this.morphForce - dt * 0.42);
+      if (this.morphForce <= 0.02) {
+        this.morphForce = 0;
+        this.morphPhase = 'idle';
+        this.autoAdvanceTimer = 0;
+        // Chain queued navigation if user skipped during morph
+        if (
+          this.pendingPlaylistIndex != null &&
+          this.pendingPlaylistIndex !== this.playlistIndex
+        ) {
+          this.morphPhase = 'break';
+        } else {
+          this.pendingPlaylistIndex = null;
+        }
+      }
+    }
+  }
+
+  private swapToPlaylistIndex(index: number): void {
+    const entry = this.playlist[index];
+    if (!entry) return;
+    this.playlistIndex = index;
+    this.lastImageSample = entry;
+    this.hasImage = true;
+    // Rebuild cloud while fully broken so the swap is hidden in dust
+    this.destroyMesh();
+    this.buildImagePoints(entry.positions, entry.colors, entry.seeds);
+    this.mode = 'image';
+    this.uniforms.uImageMode.value = 1;
+    this.breakAmount = Math.min(this.breakAmount, 0.35);
+    this.baseFrequency = 1.05;
+    this.uniforms.frequency.value = 1.05;
+    this.autoMix = false;
+    this.material.blending = THREE.NormalBlending;
+    this.material.depthWrite = true;
+    this.material.needsUpdate = true;
+    this.holderObjects.rotation.set(0, 0, 0);
+    this.position.set(0, 0, 5.2);
+  }
+
   private enterImageMode(_rebuild: boolean): void {
     if (!this.hasImage || !this.lastImageSample) {
       // Keep current mesh until a file is loaded; preset id is still 'image'.
@@ -391,8 +641,10 @@ export class ReactiveParticleField extends THREE.Object3D {
     this.uniforms.uImageMode.value = 1;
     this.breakAmount = 0;
     this.uniforms.uBreak.value = 0;
-    this.baseFrequency = 1.15;
-    this.uniforms.frequency.value = 1.15;
+    this.morphForce = 0;
+    this.morphPhase = 'idle';
+    this.baseFrequency = 1.05;
+    this.uniforms.frequency.value = 1.05;
     this.autoMix = false;
     this.material.blending = THREE.NormalBlending;
     this.material.depthWrite = true;
@@ -407,8 +659,8 @@ export class ReactiveParticleField extends THREE.Object3D {
     if (animateIn) {
       gsap.fromTo(
         this.position,
-        { z: framedZ + 1.6 },
-        { duration: 0.75, z: framedZ, ease: 'elastic.out(0.65)' },
+        { z: framedZ + 1.2 },
+        { duration: 1.1, z: framedZ, ease: 'power2.out' },
       );
     }
   }
@@ -457,10 +709,10 @@ export class ReactiveParticleField extends THREE.Object3D {
     geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
 
     this.uniforms.offsetSize.value = this.randomOffsetSize();
-    // Smaller points for denser sampling — slight overlap, not muddy blobs
-    this.baseSize = 0.34;
+    // Fine stipple — denser sample + smaller points
+    this.baseSize = 0.18;
     this.uniforms.size.value = this.baseSize * this.preset.sizeScale;
-    this.uniforms.maxDistance.value = 4.5;
+    this.uniforms.maxDistance.value = 3.8;
 
     const points = new THREE.Points(geometry, this.material);
     this.pointsMesh = points;

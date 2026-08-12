@@ -29,9 +29,9 @@ export type SampleImageOptions = {
 };
 
 const DEFAULTS: Required<SampleImageOptions> = {
-  maxSide: 256,
+  maxSide: 320,
   stride: 1,
-  maxParticles: 36000,
+  maxParticles: 52000,
   planeHalfWidth: 5.2,
   planeMaxHalfHeight: 3.85,
   minAlpha: 10,

@@ -21,7 +21,7 @@ app.innerHTML = `
     <p class="hint">Allows camera and microphone</p>
   </div>
   <div class="preset-flash" aria-live="polite" aria-atomic="true"></div>
-  <div class="drop-hint" aria-hidden="true">Drop image</div>
+  <div class="drop-hint" aria-hidden="true">Drop images</div>
   <nav class="preset-strip" aria-label="Visual presets">
     ${VISUAL_PRESETS.map(
       (p, i) =>
@@ -30,8 +30,9 @@ app.innerHTML = `
           <span class="preset-label">${p.name}</span>
         </button>`,
     ).join('')}
-    <button type="button" class="load-image" title="Load image">Load image</button>
-    <input type="file" class="image-file" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
+    <button type="button" class="load-image" title="Add images">Add images</button>
+    <span class="image-playlist" aria-live="polite" hidden>0 / 0</span>
+    <input type="file" class="image-file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden />
   </nav>
 `;
 
@@ -44,6 +45,7 @@ const presetFlash = app.querySelector<HTMLElement>('.preset-flash')!;
 const dropHint = app.querySelector<HTMLElement>('.drop-hint')!;
 const loadImageBtn = app.querySelector<HTMLButtonElement>('.load-image')!;
 const imageFileInput = app.querySelector<HTMLInputElement>('.image-file')!;
+const imagePlaylistEl = app.querySelector<HTMLElement>('.image-playlist')!;
 
 const renderer = new THREE.WebGLRenderer({
   canvas,
@@ -56,6 +58,7 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
 const scene = new THREE.Scene();
 const particles = new ReactiveParticleField();
+particles.setAutoAdvanceSeconds(8);
 scene.add(particles);
 
 const audio = new AudioReactive();
@@ -72,6 +75,7 @@ let hintTimer = 0;
 let dragDepth = 0;
 /** Pending Image selection until a file is loaded (keeps prior look visible). */
 let awaitingImage = false;
+let lastPlaylistUiKey = '';
 
 function syncPresetUi(id: VisualPresetId): void {
   for (const btn of presetStrip.querySelectorAll<HTMLButtonElement>('.preset-dot')) {
@@ -80,6 +84,24 @@ function syncPresetUi(id: VisualPresetId): void {
   const imageActive = id === 'image' || awaitingImage;
   loadImageBtn.classList.toggle('is-emphasis', imageActive);
   app.classList.toggle('is-image-mode', imageActive);
+  syncPlaylistUi();
+}
+
+function syncPlaylistUi(): void {
+  const count = particles.imagePlaylistCount;
+  const index = particles.imagePlaylistIndex;
+  const key = `${index}/${count}`;
+  if (key === lastPlaylistUiKey && (count > 0) === !imagePlaylistEl.hidden) {
+    return;
+  }
+  lastPlaylistUiKey = key;
+  if (count <= 0) {
+    imagePlaylistEl.hidden = true;
+    imagePlaylistEl.textContent = '';
+    return;
+  }
+  imagePlaylistEl.hidden = false;
+  imagePlaylistEl.textContent = `${index} / ${count}`;
 }
 
 function flashPresetName(name: string): void {
@@ -137,9 +159,20 @@ function applyVisualPreset(id: VisualPresetId, announce = true): void {
   hideDropHint();
 }
 
-async function ingestImageFile(file: File, announce = true): Promise<void> {
+async function ingestImageFiles(files: File[], announce = true): Promise<void> {
+  const list = Array.from(files).filter((f) => f.type.startsWith('image/'));
+  if (list.length === 0) {
+    if (awaitingImage) showDropHint(true);
+    return;
+  }
   try {
-    await particles.loadImage(file);
+    const added = await particles.loadImages(list, {
+      activateFirst: !particles.hasLoadedImage || awaitingImage,
+    });
+    if (added === 0) {
+      showDropHint(true);
+      return;
+    }
     awaitingImage = false;
     const preset = particles.activePreset;
     renderer.setClearColor(preset.clearColor, 1);
@@ -148,11 +181,32 @@ async function ingestImageFile(file: File, announce = true): Promise<void> {
       .padStart(6, '0')}`;
     storePresetId('image');
     syncPresetUi('image');
-    if (announce) flashPresetName('Image');
+    if (announce) {
+      const n = particles.imagePlaylistCount;
+      flashPresetName(n > 1 ? `Image ${particles.imagePlaylistIndex}/${n}` : 'Image');
+    }
     hideDropHint();
   } catch {
     showDropHint(true);
   }
+}
+
+async function ingestImageFile(file: File, announce = true): Promise<void> {
+  await ingestImageFiles([file], announce);
+}
+
+function stepPlaylist(dir: 1 | -1): void {
+  if (!particles.hasLoadedImage || particles.imagePlaylistCount < 2) return;
+  const count = particles.imagePlaylistCount;
+  const current = particles.imagePlaylistIndex; // 1-based
+  const nextLabel =
+    dir > 0
+      ? (current % count) + 1
+      : ((current - 2 + count) % count) + 1;
+  const ok = dir > 0 ? particles.nextImage() : particles.prevImage();
+  if (!ok) return;
+  syncPlaylistUi();
+  flashPresetName(`Image ${nextLabel}/${count}`);
 }
 
 function openImagePicker(): void {
@@ -182,7 +236,8 @@ function bindPointer(): void {
     if (!running) return;
     canvas.setPointerCapture(e.pointerId);
     const n = clientToNormalized(e.clientX, e.clientY);
-    particles.pulseNormalized(n.x, n.y, 1.2, `ptr-${e.pointerId}`, {
+    const soft = particles.fieldMode === 'image' ? 0.7 : 1;
+    particles.pulseNormalized(n.x, n.y, 1.2 * soft, `ptr-${e.pointerId}`, {
       mode: 'scatter',
       radius: 0.2,
     });
@@ -190,7 +245,8 @@ function bindPointer(): void {
   const onMove = (e: PointerEvent) => {
     if (!running || e.buttons === 0) return;
     const n = clientToNormalized(e.clientX, e.clientY);
-    particles.holdNormalized(n.x, n.y, 0.9, `ptr-${e.pointerId}`, {
+    const soft = particles.fieldMode === 'image' ? 0.7 : 1;
+    particles.holdNormalized(n.x, n.y, 0.9 * soft, `ptr-${e.pointerId}`, {
       mode: 'scatter',
       radius: 0.18,
     });
@@ -223,6 +279,22 @@ function bindPresets(): void {
 
   window.addEventListener('keydown', (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+    if (e.key === '[' || e.key === 'ArrowLeft') {
+      if (particles.hasLoadedImage && particles.imagePlaylistCount > 1) {
+        e.preventDefault();
+        stepPlaylist(-1);
+      }
+      return;
+    }
+    if (e.key === ']' || e.key === 'ArrowRight') {
+      if (particles.hasLoadedImage && particles.imagePlaylistCount > 1) {
+        e.preventDefault();
+        stepPlaylist(1);
+      }
+      return;
+    }
+
     const id = presetIdFromKey(e.key);
     if (!id) return;
     e.preventDefault();
@@ -230,8 +302,8 @@ function bindPresets(): void {
   });
 
   imageFileInput.addEventListener('change', () => {
-    const file = imageFileInput.files?.[0];
-    if (file) void ingestImageFile(file);
+    const files = imageFileInput.files;
+    if (files && files.length > 0) void ingestImageFiles(Array.from(files));
   });
 }
 
@@ -264,9 +336,11 @@ function bindDragDrop(): void {
     e.preventDefault();
     dragDepth = 0;
     app.classList.remove('is-dragover');
-    const file = e.dataTransfer?.files?.[0];
-    if (file?.type.startsWith('image/')) {
-      void ingestImageFile(file);
+    const files = Array.from(e.dataTransfer?.files ?? []).filter((f) =>
+      f.type.startsWith('image/'),
+    );
+    if (files.length > 0) {
+      void ingestImageFiles(files);
     } else if (awaitingImage) {
       showDropHint(true);
     } else {
@@ -278,6 +352,7 @@ function bindDragDrop(): void {
 /** Map MediaPipe hands → scatter / wind / gather on up to 4 TouchField slots. */
 function applyHandVerbs(frame: ReturnType<HandTracker['update']>): void {
   const keep = new Set<string>();
+  const imageSoft = particles.fieldMode === 'image' ? 0.62 : 1;
 
   for (const hand of frame.hands) {
     const pinching = hand.pinchStrength > 0.55;
@@ -290,15 +365,18 @@ function applyHandVerbs(frame: ReturnType<HandTracker['update']>): void {
       particles.holdNormalized(
         gx,
         gy,
-        0.55 + hand.pinchStrength * 0.65,
+        (0.55 + hand.pinchStrength * 0.65) * imageSoft,
         gatherId,
-        { mode: 'gather', radius: 0.26 + hand.pinchStrength * 0.08 },
+        {
+          mode: 'gather',
+          radius: 0.26 + hand.pinchStrength * 0.08,
+        },
       );
     } else {
       const indexId = hand.index.id;
       keep.add(indexId);
       const indexStr =
-        0.7 + hand.index.speed * 0.45 + hand.pinchStrength * 0.15;
+        (0.7 + hand.index.speed * 0.45 + hand.pinchStrength * 0.15) * imageSoft;
       particles.holdNormalized(hand.index.x, hand.index.y, indexStr, indexId, {
         mode: 'scatter',
         radius: 0.16,
@@ -306,7 +384,7 @@ function applyHandVerbs(frame: ReturnType<HandTracker['update']>): void {
 
       const palmId = hand.palm.id;
       keep.add(palmId);
-      const palmStr = 0.28 + hand.palm.speed * 0.25;
+      const palmStr = (0.28 + hand.palm.speed * 0.25) * imageSoft;
       particles.holdNormalized(hand.palm.x, hand.palm.y, palmStr, palmId, {
         mode: 'wind',
         radius: 0.4 + Math.min(0.12, hand.palm.speed * 0.08),
@@ -392,6 +470,8 @@ function tick(now: number): void {
     audio.isActive ? audio.frequencyData : null,
     audio.isActive,
   );
+
+  if (particles.fieldMode === 'image') syncPlaylistUi();
 
   renderer.render(scene, particles.particleCamera);
 }

@@ -106,9 +106,9 @@ void main() {
       home.y * frequency,
       home.z * frequency + color.r * 2.
     );
-    // Stronger outward drift as break rises (photo → dust)
-    vec3 dust = home + curlOff * amplitude * (0.55 + brk * 2.4);
-    dust.z += curlOff.z * amplitude * brk * 3.2;
+    // Soft outward drift as break rises (photo → dust) — keep image mode gentle
+    vec3 dust = home + curlOff * amplitude * (0.38 + brk * 1.55);
+    dust.z += curlOff.z * amplitude * brk * 1.9;
     newpos = mix(home + curlOff * breath, dust, brk);
     d = length(newpos - home) / max(maxDistance, 0.001);
     vColor = color;
@@ -127,7 +127,7 @@ void main() {
   float scatterBoost = 0.;
   float ripple = 0.;
   // Idle touch influence stays mild so formed photo isn't constantly shredded
-  float touchBreak = uImageMode > 0.5 ? (0.22 + clamp(uBreak, 0., 1.) * 1.05) : 1.;
+  float touchBreak = uImageMode > 0.5 ? (0.14 + clamp(uBreak, 0., 1.) * 0.72) : 1.;
 
   for (int i = 0; i < 4; i++) {
     float str = uTouchStrength[i];

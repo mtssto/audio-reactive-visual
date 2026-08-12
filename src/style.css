@@ -235,6 +235,24 @@ body.is-live .preset-strip:hover {
   opacity: 0.85;
 }
 
+.image-playlist {
+  font-size: 0.55rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.45);
+  padding: 0.1rem 0.15rem 0.25rem;
+  opacity: 0.4;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.preset-strip:hover .image-playlist,
+.preset-strip:focus-within .image-playlist,
+#app.is-image-mode .image-playlist {
+  opacity: 0.75;
+}
+
 .drop-hint {
   position: absolute;
   left: 50%;
