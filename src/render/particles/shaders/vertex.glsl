@@ -172,9 +172,9 @@ void main() {
 
   float sizeBase = size + (pow(d,3.) * offsetSize) * (1./-mvPosition.z);
   if (uImageMode > 0.5) {
-    // Dense stipple: small points with slight overlap (~4–9px at typical framing)
+    // Dense stipple with overlap so black clear doesn’t show through gaps
     float z = max(0.001, -mvPosition.z);
-    sizeBase = max(1.0, size * 165. / z) + offsetSize * 0.05 * d;
+    sizeBase = max(1.2, size * 195. / z) + offsetSize * 0.05 * d;
   }
   gl_PointSize = sizeBase * (1. + scatterBoost * 2.4);
   gl_Position = projectionMatrix * mvPosition;

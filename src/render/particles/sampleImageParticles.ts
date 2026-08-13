@@ -9,6 +9,8 @@ export type ImageParticleSample = {
   /** World-space half extents of the fitted image plane. */
   halfWidth: number;
   halfHeight: number;
+  /** Mean particle RGB (0–1) after exposure — useful for tinted clear color. */
+  averageColor: [number, number, number];
 };
 
 export type SampleImageOptions = {
@@ -26,6 +28,11 @@ export type SampleImageOptions = {
   minAlpha?: number;
   /** Skip near-white pixels when luminance exceeds this (0–1). Use ≥1 to disable. */
   skipWhiteAbove?: number;
+  /**
+   * Linear exposure gain on sampled RGB (image mode). Soft-rolls near 1 so
+   * highlights don’t wash out. 1 = unchanged.
+   */
+  exposure?: number;
 };
 
 const DEFAULTS: Required<SampleImageOptions> = {
@@ -36,7 +43,18 @@ const DEFAULTS: Required<SampleImageOptions> = {
   planeMaxHalfHeight: 3.85,
   minAlpha: 10,
   skipWhiteAbove: 1,
+  exposure: 1,
 };
+
+/** Mild gain with soft knee so bright pixels don’t clip to white. */
+function softExpose(channel: number, gain: number): number {
+  if (gain === 1) return channel;
+  const x = channel * gain;
+  if (x <= 0.88) return Math.min(1, x);
+  // Soft roll-off above ~0.88
+  const t = x - 0.88;
+  return Math.min(1, 0.88 + t / (1 + t * 2.8));
+}
 
 function fitSampleSize(
   srcW: number,
@@ -83,6 +101,7 @@ export function sampleImageToParticles(
     planeMaxHalfHeight,
     minAlpha,
     skipWhiteAbove,
+    exposure,
   } = { ...DEFAULTS, ...opts };
 
   const srcW =
@@ -107,6 +126,7 @@ export function sampleImageToParticles(
       aspect: 1,
       halfWidth: 0,
       halfHeight: 0,
+      averageColor: [0.05, 0.05, 0.05],
     };
   }
 
@@ -150,6 +170,9 @@ export function sampleImageToParticles(
   const colors = new Float32Array(est * 3);
   const seeds = new Float32Array(est);
   let count = 0;
+  let sumR = 0;
+  let sumG = 0;
+  let sumB = 0;
 
   for (let y = 0; y < h; y += step) {
     for (let x = 0; x < w; x += step) {
@@ -158,11 +181,16 @@ export function sampleImageToParticles(
       const a = data[i + 3]!;
       if (a < minAlpha) continue;
 
-      const r = data[i]! / 255;
-      const g = data[i + 1]! / 255;
-      const b = data[i + 2]! / 255;
+      let r = data[i]! / 255;
+      let g = data[i + 1]! / 255;
+      let b = data[i + 2]! / 255;
       const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
       if (skipWhiteAbove < 1 && lum > skipWhiteAbove && a > 240) continue;
+
+      // Image-mode exposure: lift midtones without crushing alpha skips
+      r = softExpose(r, exposure);
+      g = softExpose(g, exposure);
+      b = softExpose(b, exposure);
 
       const u = (x + 0.5) / w;
       const v = (y + 0.5) / h;
@@ -179,11 +207,15 @@ export function sampleImageToParticles(
       colors[o + 1] = g;
       colors[o + 2] = b;
       seeds[count] = Math.random();
+      sumR += r;
+      sumG += g;
+      sumB += b;
       count += 1;
     }
     if (count >= maxParticles) break;
   }
 
+  const inv = count > 0 ? 1 / count : 0;
   return {
     positions: positions.subarray(0, count * 3),
     colors: colors.subarray(0, count * 3),
@@ -192,6 +224,7 @@ export function sampleImageToParticles(
     aspect,
     halfWidth: halfW,
     halfHeight: halfH,
+    averageColor: [sumR * inv, sumG * inv, sumB * inv],
   };
 }
 

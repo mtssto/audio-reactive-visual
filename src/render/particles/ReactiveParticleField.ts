@@ -44,6 +44,7 @@ type StoredImageSample = {
   halfWidth: number;
   halfHeight: number;
   count: number;
+  averageColor: [number, number, number];
 };
 
 type MorphPhase = 'idle' | 'break' | 'reform';
@@ -79,6 +80,8 @@ export class ReactiveParticleField extends THREE.Object3D {
   private breakAmount = 0;
   private lastLoudness = 0;
   private lastImageSample: StoredImageSample | null = null;
+  /** Soft tinted clear derived from the active image average (not pure black). */
+  private imageClearColor = 0x0c0c0c;
 
   /** Sampled image playlist (capped); active index is playlistIndex. */
   private playlist: StoredImageSample[] = [];
@@ -134,6 +137,7 @@ export class ReactiveParticleField extends THREE.Object3D {
   }
 
   get clearColor(): number {
+    if (this.mode === 'image' && this.hasImage) return this.imageClearColor;
     return this.preset.clearColor;
   }
 
@@ -296,6 +300,7 @@ export class ReactiveParticleField extends THREE.Object3D {
         this.playlistIndex = target;
         this.lastImageSample = this.playlist[target]!;
         this.hasImage = true;
+        this.applyImageClearFromAverage(this.lastImageSample.averageColor);
         this.cancelMorph();
         this.showImageCloud(true);
         this.autoAdvanceTimer = 0;
@@ -314,11 +319,13 @@ export class ReactiveParticleField extends THREE.Object3D {
   ): number {
     const activate = opts.activate ?? true;
     const sample = sampleImageToParticles(source, {
-      maxSide: 320,
-      maxParticles: 52000,
+      maxSide: 340,
+      maxParticles: 56000,
       planeHalfWidth: 5.2,
       planeMaxHalfHeight: 3.85,
       skipWhiteAbove: 1,
+      // Lift midtones toward the original photo without washing highlights
+      exposure: 1.18,
     });
     if (sample.count < 8) {
       throw new Error('Image produced too few particles');
@@ -331,6 +338,7 @@ export class ReactiveParticleField extends THREE.Object3D {
       halfWidth: sample.halfWidth,
       halfHeight: sample.halfHeight,
       count: sample.count,
+      averageColor: sample.averageColor,
     };
 
     this.pushPlaylistEntry(stored);
@@ -347,6 +355,7 @@ export class ReactiveParticleField extends THREE.Object3D {
       this.playlistIndex = this.playlist.length - 1;
       this.lastImageSample = stored;
       this.hasImage = true;
+      this.applyImageClearFromAverage(stored.averageColor);
       this.cancelMorph();
       this.showImageCloud(true);
       this.autoAdvanceTimer = 0;
@@ -527,6 +536,16 @@ export class ReactiveParticleField extends THREE.Object3D {
     }
   }
 
+  private applyImageClearFromAverage(avg: [number, number, number]): void {
+    // Soft dark plate tinted toward image average — fills gaps without washing photo
+    const lift = (c: number) =>
+      Math.min(1, Math.max(0, c * 0.16 + 0.035));
+    const r = Math.round(lift(avg[0]) * 255);
+    const g = Math.round(lift(avg[1]) * 255);
+    const b = Math.round(lift(avg[2]) * 255);
+    this.imageClearColor = (r << 16) | (g << 8) | b;
+  }
+
   private pushPlaylistEntry(entry: StoredImageSample): void {
     this.playlist.push(entry);
     while (this.playlist.length > MAX_IMAGE_PLAYLIST) {
@@ -602,6 +621,7 @@ export class ReactiveParticleField extends THREE.Object3D {
     this.playlistIndex = index;
     this.lastImageSample = entry;
     this.hasImage = true;
+    this.applyImageClearFromAverage(entry.averageColor);
     // Rebuild cloud while fully broken so the swap is hidden in dust
     this.destroyMesh();
     this.buildImagePoints(entry.positions, entry.colors, entry.seeds);
@@ -631,6 +651,7 @@ export class ReactiveParticleField extends THREE.Object3D {
   private showImageCloud(animateIn: boolean): void {
     if (!this.lastImageSample) return;
 
+    this.applyImageClearFromAverage(this.lastImageSample.averageColor);
     this.destroyMesh();
     this.buildImagePoints(
       this.lastImageSample.positions,
@@ -709,8 +730,8 @@ export class ReactiveParticleField extends THREE.Object3D {
     geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
 
     this.uniforms.offsetSize.value = this.randomOffsetSize();
-    // Fine stipple — denser sample + smaller points
-    this.baseSize = 0.18;
+    // Slightly larger stipple for coverage overlap (pairs with sizeScale)
+    this.baseSize = 0.22;
     this.uniforms.size.value = this.baseSize * this.preset.sizeScale;
     this.uniforms.maxDistance.value = 3.8;
 

@@ -30,7 +30,7 @@ app.innerHTML = `
           <span class="preset-label">${p.name}</span>
         </button>`,
     ).join('')}
-    <button type="button" class="load-image" title="Add images">Add images</button>
+    <button type="button" class="load-image" title="Add images (I)">Add images</button>
     <span class="image-playlist" aria-live="polite" hidden>0 / 0</span>
     <input type="file" class="image-file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden />
   </nav>
@@ -116,6 +116,14 @@ function flashPresetName(name: string): void {
   }, 1400);
 }
 
+function syncRendererClear(): void {
+  const c = particles.clearColor;
+  renderer.setClearColor(c, 1);
+  document.documentElement.style.backgroundColor = `#${c
+    .toString(16)
+    .padStart(6, '0')}`;
+}
+
 function showDropHint(brief = true): void {
   dropHint.classList.add('is-show');
   dropHint.setAttribute('aria-hidden', 'false');
@@ -149,10 +157,7 @@ function applyVisualPreset(id: VisualPresetId, announce = true): void {
 
   awaitingImage = false;
   const preset = particles.applyPreset(id);
-  renderer.setClearColor(preset.clearColor, 1);
-  document.documentElement.style.backgroundColor = `#${preset.clearColor
-    .toString(16)
-    .padStart(6, '0')}`;
+  syncRendererClear();
   storePresetId(preset.id);
   syncPresetUi(preset.id);
   if (announce) flashPresetName(preset.name);
@@ -174,13 +179,9 @@ async function ingestImageFiles(files: File[], announce = true): Promise<void> {
       return;
     }
     awaitingImage = false;
-    const preset = particles.activePreset;
-    renderer.setClearColor(preset.clearColor, 1);
-    document.documentElement.style.backgroundColor = `#${preset.clearColor
-      .toString(16)
-      .padStart(6, '0')}`;
     storePresetId('image');
     syncPresetUi('image');
+    syncRendererClear();
     if (announce) {
       const n = particles.imagePlaylistCount;
       flashPresetName(n > 1 ? `Image ${particles.imagePlaylistIndex}/${n}` : 'Image');
@@ -206,6 +207,7 @@ function stepPlaylist(dir: 1 | -1): void {
   const ok = dir > 0 ? particles.nextImage() : particles.prevImage();
   if (!ok) return;
   syncPlaylistUi();
+  syncRendererClear();
   flashPresetName(`Image ${nextLabel}/${count}`);
 }
 
@@ -292,6 +294,15 @@ function bindPresets(): void {
         e.preventDefault();
         stepPlaylist(1);
       }
+      return;
+    }
+
+    // I / O → open multi-file image picker (discoverable flash)
+    const k = e.key.toLowerCase();
+    if (k === 'i' || k === 'o') {
+      e.preventDefault();
+      flashPresetName('Add images (I)');
+      openImagePicker();
       return;
     }
 
@@ -471,7 +482,10 @@ function tick(now: number): void {
     audio.isActive,
   );
 
-  if (particles.fieldMode === 'image') syncPlaylistUi();
+  if (particles.fieldMode === 'image') {
+    syncPlaylistUi();
+    syncRendererClear();
+  }
 
   renderer.render(scene, particles.particleCamera);
 }

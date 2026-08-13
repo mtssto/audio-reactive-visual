@@ -21,12 +21,13 @@ void main(){
   float alpha;
 
   if (vImageMode > 0.5) {
-    // Keep photo colors literal (sRGB sample → display)
-    color = vColor;
-    color = mix(color, vec3(1.0), clamp(vRipple * 0.28, 0., 0.45));
-    // Near-opaque at rest so the stipple reads as a photo; softens when dusted
-    float dustFade = mix(0.98, 0.48, clamp(vDistance * 0.4, 0., 1.));
-    alpha = circ.r * dustFade * (1.0 + vRipple * 0.35);
+    // Photo colors + mild display lift (sampling already applies soft exposure)
+    color = vColor * 1.08 + vec3(0.022);
+    color = min(color, vec3(1.0));
+    color = mix(color, vec3(1.0), clamp(vRipple * 0.22, 0., 0.4));
+    // Opaque at rest so black clear doesn’t muddy through soft point edges
+    float dustFade = mix(1.0, 0.52, clamp(vDistance * 0.4, 0., 1.));
+    alpha = circ.r * dustFade * (1.0 + vRipple * 0.3);
   } else {
     color = mix(startColor, endColor, vDistance);
     color = mix(color, vec3(1.0), clamp(vRipple * 0.65, 0., 1.));
