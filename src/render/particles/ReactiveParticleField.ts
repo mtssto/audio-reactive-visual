@@ -35,7 +35,7 @@ type ParticleUniforms = {
   uTouchMode: { value: Float32Array };
 };
 
-export type ParticleFieldMode = 'mesh' | 'image';
+export type ParticleFieldMode = 'mesh' | 'image' | 'person';
 
 type StoredImageSample = {
   positions: Float32Array;
@@ -52,10 +52,13 @@ type MorphPhase = 'idle' | 'break' | 'reform';
 const MAX_IMAGE_PLAYLIST = 10;
 /** Default seconds between auto image advances. */
 const DEFAULT_AUTO_ADVANCE_SEC = 8;
+/** Capacity for live person particle buffers (reused across frames). */
+const PERSON_POOL = 32000;
 
 /**
  * Codrops-style reactive particle cloud with presence + hand verbs,
- * plus an Image mode that samples a photo into a disintegrating field.
+ * plus Image / Person modes that sample photos or live webcam into a
+ * disintegrating field.
  */
 export class ReactiveParticleField extends THREE.Object3D {
   readonly touches = new TouchField();
@@ -91,6 +94,13 @@ export class ReactiveParticleField extends THREE.Object3D {
   private morphPhase: MorphPhase = 'idle';
   private morphForce = 0;
   private pendingPlaylistIndex: number | null = null;
+
+  /** Reusable buffers for live person cloud (avoid alloc every sample). */
+  private personPos = new Float32Array(PERSON_POOL * 3);
+  private personCol = new Float32Array(PERSON_POOL * 3);
+  private personSeed = new Float32Array(PERSON_POOL);
+  private personCount = 0;
+  private personHasCloud = false;
 
   constructor() {
     super();
@@ -137,7 +147,12 @@ export class ReactiveParticleField extends THREE.Object3D {
   }
 
   get clearColor(): number {
-    if (this.mode === 'image' && this.hasImage) return this.imageClearColor;
+    if (
+      (this.mode === 'image' && this.hasImage) ||
+      (this.mode === 'person' && this.personHasCloud)
+    ) {
+      return this.imageClearColor;
+    }
     return this.preset.clearColor;
   }
 
@@ -180,7 +195,7 @@ export class ReactiveParticleField extends THREE.Object3D {
 
   /**
    * Live-switch authored look. Remeshes so mesh / density bias is visible.
-   * Image preset enters image mode (keeps last sampled cloud if any).
+   * Image / Person presets enter sample-cloud modes.
    */
   applyPreset(id: VisualPresetId, remesh = true): VisualPreset {
     this.preset = getPreset(id);
@@ -190,14 +205,20 @@ export class ReactiveParticleField extends THREE.Object3D {
       this.preset.blending === 'normal'
         ? THREE.NormalBlending
         : THREE.AdditiveBlending;
-    // Opaque-ish stipple only once an image cloud is live; awaiting load keeps mesh soft
-    this.material.depthWrite = id === 'image' && this.hasImage;
+    // Opaque-ish stipple only once an image/person cloud is live
+    this.material.depthWrite =
+      (id === 'image' && this.hasImage) ||
+      (id === 'person' && this.personHasCloud);
     this.material.transparent = true;
     this.material.needsUpdate = true;
 
     if (id === 'image') {
+      this.exitPersonMode(false);
       this.enterImageMode(remesh);
+    } else if (id === 'person') {
+      this.enterPersonMode();
     } else {
+      this.exitPersonMode(false);
       this.enterMeshMode(remesh);
     }
     return this.preset;
@@ -355,6 +376,8 @@ export class ReactiveParticleField extends THREE.Object3D {
       this.playlistIndex = this.playlist.length - 1;
       this.lastImageSample = stored;
       this.hasImage = true;
+      this.personHasCloud = false;
+      this.personCount = 0;
       this.applyImageClearFromAverage(stored.averageColor);
       this.cancelMorph();
       this.showImageCloud(true);
@@ -397,8 +420,52 @@ export class ReactiveParticleField extends THREE.Object3D {
     return true;
   }
 
+  /**
+   * Push a live webcam particle sample into Person mode (throttled by caller).
+   */
+  applyPersonSample(
+    sample: {
+      positions: Float32Array;
+      colors: Float32Array;
+      seeds: Float32Array;
+      count: number;
+      averageColor: [number, number, number];
+    },
+  ): void {
+    if (this.preset.id !== 'person') return;
+    const n = Math.min(sample.count, PERSON_POOL);
+    if (n < 8) return;
+
+    this.personPos.set(sample.positions.subarray(0, n * 3));
+    this.personCol.set(sample.colors.subarray(0, n * 3));
+    this.personSeed.set(sample.seeds.subarray(0, n));
+    this.personCount = n;
+    this.personHasCloud = true;
+    this.applyImageClearFromAverage(sample.averageColor);
+
+    this.preset = getPreset('person');
+    this.uniforms.startColor.value.set(this.preset.startColor);
+    this.uniforms.endColor.value.set(this.preset.endColor);
+    this.material.blending = THREE.NormalBlending;
+    this.material.depthWrite = true;
+    this.material.transparent = true;
+    this.material.needsUpdate = true;
+
+    this.updatePersonCloudGeometry();
+    this.mode = 'person';
+    this.uniforms.uImageMode.value = 1;
+    this.autoMix = false;
+    this.spinRate = 0;
+    this.baseFrequency = 1.0;
+    if (this.uniforms.frequency.value < 0.5) {
+      this.uniforms.frequency.value = 1.0;
+    }
+    this.holderObjects.rotation.set(0, 0, 0);
+    this.position.set(0, 0, 5.35);
+  }
+
   remix(): void {
-    if (!this.autoMix || this.mode === 'image') return;
+    if (!this.autoMix || this.mode === 'image' || this.mode === 'person') return;
     this.destroyMesh();
     this.createPreferredMesh();
     const nextFreq = THREE.MathUtils.randFloat(0.5, 3);
@@ -456,35 +523,44 @@ export class ReactiveParticleField extends THREE.Object3D {
       this.touches.count * 0.22 + gather * 0.55,
     );
 
-    if (this.mode === 'image') {
-      this.updateImageMorph(dt);
+    if (this.mode === 'image' || this.mode === 'person') {
+      if (this.mode === 'image') this.updateImageMorph(dt);
 
       // Stay mostly formed at rest; presence/mic/touch raise break gently.
-      const presenceBreak = Math.max(0, e - 0.18) * 0.22;
+      // Person mode is even slower / softer than still Image.
+      const soft = this.mode === 'person' ? 0.72 : 1;
+      const presenceBreak = Math.max(0, e - 0.18) * 0.22 * soft;
       const breakTarget = THREE.MathUtils.clamp(
-        presenceBreak + loudness * 0.32 + touchEnergy * 0.48,
+        presenceBreak + loudness * 0.32 * soft + touchEnergy * 0.48 * soft,
         0,
         1,
       );
       // Slow break / reform ramps — less snappy than mesh modes
-      const breakLerp = breakTarget > this.breakAmount ? dt * 1.15 : dt * 0.85;
+      const rise = this.mode === 'person' ? 0.78 : 1.15;
+      const fall = this.mode === 'person' ? 0.55 : 0.85;
+      const breakLerp = breakTarget > this.breakAmount ? dt * rise : dt * fall;
       this.breakAmount +=
         (breakTarget - this.breakAmount) * Math.min(1, breakLerp);
 
-      const displayBreak = Math.max(this.breakAmount, this.morphForce);
+      const displayBreak =
+        this.mode === 'image'
+          ? Math.max(this.breakAmount, this.morphForce)
+          : this.breakAmount;
       this.uniforms.uBreak.value = displayBreak;
       this.spinRate = 0;
       sizeMul = THREE.MathUtils.lerp(1.0, 1.05, e) * p.sizeScale;
       // Soft curl only while broken — idle stays pinned to home
-      const dustAmp = 0.32 + displayBreak * 0.95;
+      const dustAmp =
+        (this.mode === 'person' ? 0.26 : 0.32) + displayBreak * 0.95;
       amplitude = THREE.MathUtils.lerp(0.04, dustAmp, displayBreak);
       timeDrive = THREE.MathUtils.lerp(
         0.04,
-        0.18,
+        this.mode === 'person' ? 0.14 : 0.18,
         Math.max(e * 0.35, displayBreak),
       );
 
       if (
+        this.mode === 'image' &&
         this.morphPhase === 'idle' &&
         this.playlist.length > 1 &&
         this.autoAdvanceSec > 0
@@ -502,22 +578,26 @@ export class ReactiveParticleField extends THREE.Object3D {
       this.morphPhase = 'idle';
     }
 
-    const freqTarget =
-      this.mode === 'image'
-        ? this.baseFrequency +
-          Math.max(this.breakAmount, this.morphForce) * 0.55 +
-          gather * 0.25
-        : this.baseFrequency + gather * 1.35;
+    const imageLike = this.mode === 'image' || this.mode === 'person';
+    const freqTarget = imageLike
+      ? this.baseFrequency +
+        Math.max(
+          this.breakAmount,
+          this.mode === 'image' ? this.morphForce : 0,
+        ) *
+          0.55 +
+        gather * 0.25
+      : this.baseFrequency + gather * 1.35;
     this.uniforms.frequency.value +=
       (freqTarget - this.uniforms.frequency.value) *
-      Math.min(1, dt * (this.mode === 'image' ? 2.2 : 5));
+      Math.min(1, dt * (imageLike ? 2.2 : 5));
 
     this.uniforms.amplitude.value = amplitude;
     this.uniforms.size.value = this.baseSize * sizeMul;
     this.uniforms.offsetGain.value = offsetGain;
     this.time += THREE.MathUtils.clamp(timeDrive, 0.08, 0.55) * (dt * 60);
 
-    if (this.mode !== 'image') {
+    if (!imageLike) {
       this.holderObjects.rotation.z += dt * this.spinRate;
     }
     this.uniforms.time.value = this.time;
@@ -525,7 +605,7 @@ export class ReactiveParticleField extends THREE.Object3D {
 
   /** Trigger remix from mic transient or pinch edge — keep subtle. */
   maybeRemixFromSignal(signal: number): void {
-    if (this.mode === 'image') return;
+    if (this.mode === 'image' || this.mode === 'person') return;
     if (
       signal > 0.18 &&
       this.remixCooldown <= 0 &&
@@ -624,7 +704,11 @@ export class ReactiveParticleField extends THREE.Object3D {
     this.applyImageClearFromAverage(entry.averageColor);
     // Rebuild cloud while fully broken so the swap is hidden in dust
     this.destroyMesh();
-    this.buildImagePoints(entry.positions, entry.colors, entry.seeds);
+    this.buildImagePoints(
+      entry.positions.slice(),
+      entry.colors.slice(),
+      entry.seeds.slice(),
+    );
     this.mode = 'image';
     this.uniforms.uImageMode.value = 1;
     this.breakAmount = Math.min(this.breakAmount, 0.35);
@@ -648,15 +732,105 @@ export class ReactiveParticleField extends THREE.Object3D {
     this.showImageCloud(false);
   }
 
+  private enterPersonMode(): void {
+    this.mode = 'person';
+    this.uniforms.uImageMode.value = 1;
+    this.autoMix = false;
+    this.spinRate = 0;
+    this.cancelMorph();
+    this.material.blending = THREE.NormalBlending;
+    this.material.depthWrite = this.personHasCloud;
+    this.material.needsUpdate = true;
+    this.holderObjects.rotation.set(0, 0, 0);
+    this.position.set(0, 0, 5.35);
+    this.baseFrequency = 1.0;
+    this.uniforms.frequency.value = 1.0;
+    this.breakAmount = Math.min(this.breakAmount, 0.15);
+    this.uniforms.uBreak.value = this.breakAmount;
+
+    if (this.personHasCloud && this.personCount > 0) {
+      this.updatePersonCloudGeometry();
+    } else {
+      // Brief empty cloud until first camera sample arrives
+      this.destroyMesh();
+    }
+  }
+
+  private exitPersonMode(remeshMesh: boolean): void {
+    if (this.mode !== 'person' && !this.personHasCloud) return;
+    this.personHasCloud = false;
+    this.personCount = 0;
+    if (this.mode === 'person') {
+      this.mode = 'mesh';
+      this.uniforms.uImageMode.value = 0;
+      this.uniforms.uBreak.value = 0;
+      this.breakAmount = 0;
+      if (remeshMesh) {
+        this.destroyMesh();
+        this.createPreferredMesh();
+      }
+    }
+  }
+
+  private updatePersonCloudGeometry(): void {
+    const n = this.personCount;
+    if (n <= 0) return;
+
+    const existing = this.pointsMesh as THREE.Points | null;
+    if (
+      existing &&
+      existing.isPoints &&
+      this.mode === 'person' &&
+      existing.geometry
+    ) {
+      const geo = existing.geometry;
+      const posAttr = geo.getAttribute('position') as THREE.BufferAttribute;
+      const colAttr = geo.getAttribute('color') as THREE.BufferAttribute;
+      const seedAttr = geo.getAttribute('aSeed') as THREE.BufferAttribute;
+      if (
+        posAttr &&
+        colAttr &&
+        seedAttr &&
+        posAttr.array.length >= n * 3 &&
+        colAttr.array.length >= n * 3 &&
+        seedAttr.array.length >= n
+      ) {
+        (posAttr.array as Float32Array).set(
+          this.personPos.subarray(0, n * 3),
+        );
+        (colAttr.array as Float32Array).set(
+          this.personCol.subarray(0, n * 3),
+        );
+        (seedAttr.array as Float32Array).set(this.personSeed.subarray(0, n));
+        posAttr.needsUpdate = true;
+        colAttr.needsUpdate = true;
+        seedAttr.needsUpdate = true;
+        geo.setDrawRange(0, n);
+        return;
+      }
+    }
+
+    this.destroyMesh();
+    // Allocate full pool so later frames can update in place
+    const positions = this.personPos.slice(0, PERSON_POOL * 3);
+    const colors = this.personCol.slice(0, PERSON_POOL * 3);
+    const seeds = this.personSeed.slice(0, PERSON_POOL);
+    this.buildImagePoints(positions, colors, seeds, {
+      drawCount: n,
+      baseSize: 0.14,
+      maxDistance: 3.4,
+    });
+  }
+
   private showImageCloud(animateIn: boolean): void {
     if (!this.lastImageSample) return;
 
     this.applyImageClearFromAverage(this.lastImageSample.averageColor);
     this.destroyMesh();
     this.buildImagePoints(
-      this.lastImageSample.positions,
-      this.lastImageSample.colors,
-      this.lastImageSample.seeds,
+      this.lastImageSample.positions.slice(),
+      this.lastImageSample.colors.slice(),
+      this.lastImageSample.seeds.slice(),
     );
     this.mode = 'image';
     this.uniforms.uImageMode.value = 1;
@@ -692,6 +866,8 @@ export class ReactiveParticleField extends THREE.Object3D {
     this.uniforms.uBreak.value = 0;
     this.breakAmount = 0;
     this.autoMix = true;
+    this.personHasCloud = false;
+    this.personCount = 0;
     this.material.depthWrite = false;
     this.material.blending =
       this.preset.blending === 'normal'
@@ -708,19 +884,20 @@ export class ReactiveParticleField extends THREE.Object3D {
     positions: Float32Array,
     colors: Float32Array,
     seeds: Float32Array,
+    opts: { drawCount?: number; baseSize?: number; maxDistance?: number } = {},
   ): void {
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute(
       'position',
-      new THREE.BufferAttribute(positions.slice(), 3),
+      new THREE.BufferAttribute(positions, 3),
     );
     geometry.setAttribute(
       'color',
-      new THREE.BufferAttribute(colors.slice(), 3),
+      new THREE.BufferAttribute(colors, 3),
     );
     geometry.setAttribute(
       'aSeed',
-      new THREE.BufferAttribute(seeds.slice(), 1),
+      new THREE.BufferAttribute(seeds, 1),
     );
     // Dummy normals so any leftover normal refs are safe
     const normals = new Float32Array(positions.length);
@@ -728,12 +905,16 @@ export class ReactiveParticleField extends THREE.Object3D {
       normals[i + 2] = 1;
     }
     geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+    const drawCount = opts.drawCount ?? seeds.length;
+    if (drawCount < seeds.length) {
+      geometry.setDrawRange(0, drawCount);
+    }
 
     this.uniforms.offsetSize.value = this.randomOffsetSize();
     // Slightly larger stipple for coverage overlap (pairs with sizeScale)
-    this.baseSize = 0.22;
+    this.baseSize = opts.baseSize ?? 0.22;
     this.uniforms.size.value = this.baseSize * this.preset.sizeScale;
-    this.uniforms.maxDistance.value = 3.8;
+    this.uniforms.maxDistance.value = opts.maxDistance ?? 3.8;
 
     const points = new THREE.Points(geometry, this.material);
     this.pointsMesh = points;
@@ -751,8 +932,8 @@ export class ReactiveParticleField extends THREE.Object3D {
 
   private createPreferredMesh(): void {
     const pref = this.preset.meshPreference;
-    if (pref === 'image') {
-      // No procedural mesh for image-only preset without a source
+    if (pref === 'image' || pref === 'person') {
+      // No procedural mesh for sample-cloud presets without a source
       return;
     }
     let useBox: boolean;

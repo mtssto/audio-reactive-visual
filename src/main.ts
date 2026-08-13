@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import './style.css';
 import { AudioReactive } from './audio/AudioReactive';
 import { HandTracker } from './core/HandTracker';
+import { PersonSegmenter } from './core/PersonSegmenter';
 import { PresenceSensor } from './core/PresenceSensor';
 import { ReactiveParticleField } from './render/particles/ReactiveParticleField';
 import {
@@ -64,6 +65,7 @@ scene.add(particles);
 const audio = new AudioReactive();
 const hands = new HandTracker();
 const presence = new PresenceSensor();
+const personSeg = new PersonSegmenter();
 
 let cameraStream: MediaStream | null = null;
 let running = false;
@@ -234,11 +236,15 @@ function clientToNormalized(clientX: number, clientY: number): { x: number; y: n
 }
 
 function bindPointer(): void {
+  const touchSoft = () =>
+    particles.fieldMode === 'image' || particles.fieldMode === 'person'
+      ? 0.7
+      : 1;
   const onDown = (e: PointerEvent) => {
     if (!running) return;
     canvas.setPointerCapture(e.pointerId);
     const n = clientToNormalized(e.clientX, e.clientY);
-    const soft = particles.fieldMode === 'image' ? 0.7 : 1;
+    const soft = touchSoft();
     particles.pulseNormalized(n.x, n.y, 1.2 * soft, `ptr-${e.pointerId}`, {
       mode: 'scatter',
       radius: 0.2,
@@ -247,7 +253,7 @@ function bindPointer(): void {
   const onMove = (e: PointerEvent) => {
     if (!running || e.buttons === 0) return;
     const n = clientToNormalized(e.clientX, e.clientY);
-    const soft = particles.fieldMode === 'image' ? 0.7 : 1;
+    const soft = touchSoft();
     particles.holdNormalized(n.x, n.y, 0.9 * soft, `ptr-${e.pointerId}`, {
       mode: 'scatter',
       radius: 0.18,
@@ -363,7 +369,10 @@ function bindDragDrop(): void {
 /** Map MediaPipe hands → scatter / wind / gather on up to 4 TouchField slots. */
 function applyHandVerbs(frame: ReturnType<HandTracker['update']>): void {
   const keep = new Set<string>();
-  const imageSoft = particles.fieldMode === 'image' ? 0.62 : 1;
+  const imageSoft =
+    particles.fieldMode === 'image' || particles.fieldMode === 'person'
+      ? 0.62
+      : 1;
 
   for (const hand of frame.hands) {
     const pinching = hand.pinchStrength > 0.55;
@@ -445,6 +454,8 @@ async function start(): Promise<void> {
   }
 
   await hands.init();
+  // Person mode prefers selfie segmentation; failure → mirrored frame sampling
+  void personSeg.init();
 
   gate.remove();
   document.body.classList.add('is-live');
@@ -472,6 +483,11 @@ function tick(now: number): void {
   const presenceState = presence.update(video, dt, handsPresent);
   particles.setPresence(presenceState, presence.energy);
 
+  if (particles.fieldMode === 'person' && video.readyState >= 2) {
+    const live = personSeg.sample(video, now);
+    if (live) particles.applyPersonSample(live.sample);
+  }
+
   if (audio.isActive) {
     particles.maybeRemixFromSignal(audio.transient * 0.65);
   }
@@ -482,7 +498,7 @@ function tick(now: number): void {
     audio.isActive,
   );
 
-  if (particles.fieldMode === 'image') {
+  if (particles.fieldMode === 'image' || particles.fieldMode === 'person') {
     syncPlaylistUi();
     syncRendererClear();
   }

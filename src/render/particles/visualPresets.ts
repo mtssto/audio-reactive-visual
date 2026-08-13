@@ -4,9 +4,10 @@ export type VisualPresetId =
   | 'ice'
   | 'mono'
   | 'pulse'
-  | 'image';
+  | 'image'
+  | 'person';
 
-export type MeshPreference = 'cylinder' | 'box' | 'mixed' | 'image';
+export type MeshPreference = 'cylinder' | 'box' | 'mixed' | 'image' | 'person';
 
 export type VisualBlending = 'additive' | 'normal';
 
@@ -138,6 +139,24 @@ export const VISUAL_PRESETS: readonly VisualPreset[] = [
     offsetSizeMin: 3,
     offsetSizeMax: 8,
   },
+  {
+    id: 'person',
+    name: 'Person',
+    startColor: 0xffe8d4,
+    endColor: 0x8ab4ff,
+    clearColor: 0x060608,
+    blending: 'normal',
+    // Slow, soft disintegrate — presence/mic/touch raise break gently
+    amplitudeScale: 0.58,
+    idleAmp: 0.04,
+    presentAmp: 0.62,
+    sizeScale: 0.42,
+    remixChance: 0,
+    meshPreference: 'person',
+    density: 1.7,
+    offsetSizeMin: 2,
+    offsetSizeMax: 5,
+  },
 ] as const;
 
 export const DEFAULT_PRESET_ID: VisualPresetId = 'neon';
@@ -179,6 +198,7 @@ export function presetIdFromKey(key: string): VisualPresetId | null {
     '4': 'mono',
     '5': 'pulse',
     '6': 'image',
+    '7': 'person',
   };
   return map[key] ?? null;
 }

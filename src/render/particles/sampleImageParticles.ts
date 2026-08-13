@@ -13,6 +13,14 @@ export type ImageParticleSample = {
   averageColor: [number, number, number];
 };
 
+export type PersonMask = {
+  data: Float32Array;
+  width: number;
+  height: number;
+  /** Keep pixels with mask ≥ this (0–1). */
+  threshold?: number;
+};
+
 export type SampleImageOptions = {
   /** Max long-side resolution for the sample grid (before stride). */
   maxSide?: number;
@@ -33,9 +41,17 @@ export type SampleImageOptions = {
    * highlights don’t wash out. 1 = unchanged.
    */
   exposure?: number;
+  /** Mirror horizontally (webcam selfie view). */
+  mirrorX?: boolean;
+  /** Optional person/selfie confidence mask (same aspect as source). */
+  personMask?: PersonMask | null;
+  /** Skip pixels darker than this luminance (0–1); useful for fallback sampling. */
+  minLuminance?: number;
 };
 
-const DEFAULTS: Required<SampleImageOptions> = {
+const DEFAULTS: Required<Omit<SampleImageOptions, 'personMask'>> & {
+  personMask: PersonMask | null;
+} = {
   maxSide: 320,
   stride: 1,
   maxParticles: 52000,
@@ -44,6 +60,9 @@ const DEFAULTS: Required<SampleImageOptions> = {
   minAlpha: 10,
   skipWhiteAbove: 1,
   exposure: 1,
+  mirrorX: false,
+  personMask: null,
+  minLuminance: 0,
 };
 
 /** Mild gain with soft knee so bright pixels don’t clip to white. */
@@ -102,6 +121,9 @@ export function sampleImageToParticles(
     minAlpha,
     skipWhiteAbove,
     exposure,
+    mirrorX,
+    personMask,
+    minLuminance,
   } = { ...DEFAULTS, ...opts };
 
   const srcW =
@@ -155,7 +177,15 @@ export function sampleImageToParticles(
   // High-quality downscale keeps photo detail in particle colors
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(source as CanvasImageSource, 0, 0, w, h);
+  if (mirrorX) {
+    ctx.save();
+    ctx.translate(w, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(source as CanvasImageSource, 0, 0, w, h);
+    ctx.restore();
+  } else {
+    ctx.drawImage(source as CanvasImageSource, 0, 0, w, h);
+  }
   const { data } = ctx.getImageData(0, 0, w, h);
 
   const aspect = w / h;
@@ -164,6 +194,12 @@ export function sampleImageToParticles(
     planeHalfWidth,
     planeMaxHalfHeight,
   );
+
+  const mask = personMask;
+  const maskThresh = mask?.threshold ?? 0.42;
+  const maskW = mask?.width ?? 0;
+  const maskH = mask?.height ?? 0;
+  const maskData = mask?.data ?? null;
 
   const est = Math.ceil(w / step) * Math.ceil(h / step);
   const positions = new Float32Array(est * 3);
@@ -181,10 +217,22 @@ export function sampleImageToParticles(
       const a = data[i + 3]!;
       if (a < minAlpha) continue;
 
+      if (maskData && maskW > 0 && maskH > 0) {
+        // Canvas may be mirrored; MediaPipe mask is on the unmirrored frame.
+        const u = (x + 0.5) / w;
+        const v = (y + 0.5) / h;
+        const mu = mirrorX ? 1 - u : u;
+        const mx = Math.min(maskW - 1, Math.max(0, Math.floor(mu * maskW)));
+        const my = Math.min(maskH - 1, Math.max(0, Math.floor(v * maskH)));
+        const conf = maskData[my * maskW + mx] ?? 0;
+        if (conf < maskThresh) continue;
+      }
+
       let r = data[i]! / 255;
       let g = data[i + 1]! / 255;
       let b = data[i + 2]! / 255;
       const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      if (lum < minLuminance) continue;
       if (skipWhiteAbove < 1 && lum > skipWhiteAbove && a > 240) continue;
 
       // Image-mode exposure: lift midtones without crushing alpha skips
