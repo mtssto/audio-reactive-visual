@@ -5,7 +5,8 @@ export type VisualPresetId =
   | 'mono'
   | 'pulse'
   | 'image'
-  | 'person';
+  | 'person'
+  | 'blob';
 
 export type MeshPreference = 'cylinder' | 'box' | 'mixed' | 'image' | 'person';
 
@@ -131,7 +132,6 @@ export const VISUAL_PRESETS: readonly VisualPreset[] = [
     amplitudeScale: 0.72,
     idleAmp: 0.06,
     presentAmp: 0.78,
-    // Slightly larger points → tighter coverage, less black peek-through
     sizeScale: 0.62,
     remixChance: 0,
     meshPreference: 'image',
@@ -146,7 +146,6 @@ export const VISUAL_PRESETS: readonly VisualPreset[] = [
     endColor: 0x8ab4ff,
     clearColor: 0x060608,
     blending: 'normal',
-    // Slow, soft disintegrate — presence/mic/touch raise break gently
     amplitudeScale: 0.58,
     idleAmp: 0.04,
     presentAmp: 0.62,
@@ -156,6 +155,23 @@ export const VISUAL_PRESETS: readonly VisualPreset[] = [
     density: 1.7,
     offsetSizeMin: 2,
     offsetSizeMax: 5,
+  },
+  {
+    id: 'blob',
+    name: 'Blob',
+    startColor: 0x3dffb5,
+    endColor: 0x1a6bff,
+    clearColor: 0x02060a,
+    blending: 'additive',
+    amplitudeScale: 1.08,
+    idleAmp: 0.34,
+    presentAmp: 1.15,
+    sizeScale: 1.02,
+    remixChance: 0.2,
+    meshPreference: 'mixed',
+    density: 1.1,
+    offsetSizeMin: 34,
+    offsetSizeMax: 66,
   },
 ] as const;
 
@@ -199,6 +215,9 @@ export function presetIdFromKey(key: string): VisualPresetId | null {
     '5': 'pulse',
     '6': 'image',
     '7': 'person',
+    '8': 'blob',
+    b: 'blob',
+    B: 'blob',
   };
   return map[key] ?? null;
 }

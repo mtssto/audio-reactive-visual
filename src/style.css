@@ -24,6 +24,8 @@ body {
 
 .stage {
   display: block;
+  position: relative;
+  z-index: 1;
   width: 100%;
   height: 100%;
   touch-action: none;
@@ -35,12 +37,84 @@ body.is-live .stage {
   cursor: none;
 }
 
-.cam {
+/* Hidden 1×1 feed for MediaPipe / CV (always analysis-only; Blob uses crop canvas) */
+.cam,
+.blob-file-video {
   position: absolute;
+  inset: auto;
   width: 1px;
   height: 1px;
   opacity: 0;
   pointer-events: none;
+  z-index: 0;
+  object-fit: contain;
+  background: #000;
+}
+
+/* Full-frame Blob stack: bg → bloom halo → overlay */
+.blob-zoom {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+  background: #000;
+}
+
+.blob-crop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  transition: opacity 0.35s ease;
+  z-index: 1;
+}
+
+.blob-bloom {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 2;
+  mix-blend-mode: screen;
+  filter: blur(11px) brightness(1.12) saturate(1.05);
+  transition: opacity 0.35s ease;
+}
+
+#app.is-blob-mode .blob-crop.blob-crop-visible {
+  opacity: 1;
+}
+
+#app.is-blob-mode .blob-bloom {
+  opacity: 0.32;
+}
+
+#app.is-blob-mode .stage {
+  opacity: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+#app.is-blob-mode .blob-zoom {
+  z-index: 1;
+}
+
+.blob-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 3;
+  opacity: 0;
+  transition: opacity 0.35s ease;
+}
+
+#app.is-blob-mode .blob-overlay {
+  opacity: 1;
 }
 
 .gate {
@@ -204,7 +278,10 @@ body.is-live .preset-strip:hover {
   }
 }
 
-.load-image {
+.load-image,
+.load-video,
+.live-cam,
+.blob-config-btn {
   appearance: none;
   border: 0;
   background: transparent;
@@ -220,19 +297,57 @@ body.is-live .preset-strip:hover {
 }
 
 .load-image:hover,
-.load-image:focus-visible {
+.load-image:focus-visible,
+.load-video:hover,
+.load-video:focus-visible,
+.live-cam:hover,
+.live-cam:focus-visible,
+.blob-config-btn:hover,
+.blob-config-btn:focus-visible {
   opacity: 0.9;
   color: rgba(255, 255, 255, 0.88);
 }
 
-.load-image.is-emphasis {
+.load-image.is-emphasis,
+.load-video.is-emphasis,
+.blob-config-btn.is-active {
   opacity: 0.75;
   color: rgba(255, 255, 255, 0.8);
 }
 
 .preset-strip:hover .load-image,
-.preset-strip:focus-within .load-image {
+.preset-strip:focus-within .load-image,
+.preset-strip:hover .load-video,
+.preset-strip:focus-within .load-video,
+.preset-strip:hover .live-cam,
+.preset-strip:focus-within .live-cam,
+.preset-strip:hover .blob-config-btn,
+.preset-strip:focus-within .blob-config-btn,
+#app.is-blob-mode .load-video,
+#app.is-blob-mode .live-cam,
+#app.is-blob-mode .blob-config-btn {
   opacity: 0.85;
+}
+
+.blob-source {
+  font-size: 0.55rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(61, 255, 181, 0.55);
+  padding: 0.05rem 0.15rem 0.2rem;
+  opacity: 0.35;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+  max-width: 9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preset-strip:hover .blob-source,
+.preset-strip:focus-within .blob-source,
+#app.is-blob-mode .blob-source {
+  opacity: 0.8;
 }
 
 .image-playlist {
@@ -251,6 +366,187 @@ body.is-live .preset-strip:hover {
 .preset-strip:focus-within .image-playlist,
 #app.is-image-mode .image-playlist {
   opacity: 0.75;
+}
+
+.config-toggle {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 0.55rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  padding: 0.2rem 0.15rem 0.05rem;
+  margin-top: 0.05rem;
+  cursor: pointer;
+  opacity: 0.3;
+  transition: opacity 0.3s ease, color 0.3s ease;
+}
+
+.config-toggle:hover,
+.config-toggle:focus-visible,
+.config-toggle.is-active {
+  opacity: 0.9;
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.preset-strip:hover .config-toggle,
+.preset-strip:focus-within .config-toggle {
+  opacity: 0.8;
+}
+
+/* Compact venue config — bottom-left, low contrast until open */
+.config-panel {
+  position: absolute;
+  left: 1rem;
+  bottom: 1rem;
+  z-index: 4;
+  width: min(16.5rem, calc(100vw - 2rem));
+  max-height: min(72vh, 34rem);
+  overflow-y: auto;
+  padding: 0.7rem 0.85rem 0.85rem;
+  background: rgba(8, 8, 10, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(12px);
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  pointer-events: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+}
+
+.config-panel[hidden] {
+  display: none;
+}
+
+.config-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.45rem;
+  position: sticky;
+  top: 0;
+  background: rgba(8, 8, 10, 0.92);
+  z-index: 1;
+  padding-bottom: 0.25rem;
+}
+
+.config-title {
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  font-size: 0.58rem;
+  opacity: 0.7;
+}
+
+.config-close {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0.1rem 0.25rem;
+  cursor: pointer;
+}
+
+.config-close:hover,
+.config-close:focus-visible {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.config-sliders {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.config-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding-top: 0.15rem;
+}
+
+.config-section + .config-section {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 0.55rem;
+}
+
+.config-section-title {
+  margin: 0 0 0.1rem;
+  font-size: 0.52rem;
+  font-weight: 500;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.config-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto auto;
+  gap: 0.15rem 0.5rem;
+  align-items: center;
+  cursor: default;
+}
+
+.config-label {
+  grid-column: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  opacity: 0.55;
+  font-size: 0.55rem;
+}
+
+.config-row output {
+  grid-column: 2;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.65;
+  font-size: 0.55rem;
+  min-width: 2.6rem;
+  text-align: right;
+}
+
+.config-row input[type='range'] {
+  grid-column: 1 / -1;
+  width: 100%;
+  margin: 0;
+  accent-color: rgba(220, 220, 220, 0.85);
+  cursor: pointer;
+}
+
+.config-row--select {
+  grid-template-rows: auto;
+  align-items: center;
+}
+
+.config-row--select select {
+  grid-column: 2;
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.82);
+  font: inherit;
+  font-size: 0.55rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 0.28rem 0.45rem;
+  border-radius: 2px;
+  cursor: pointer;
+  min-width: 5.5rem;
+  text-align: right;
+}
+
+.config-row--select select:hover,
+.config-row--select select:focus-visible {
+  border-color: rgba(255, 255, 255, 0.28);
+  outline: none;
+}
+
+.config-row--select select option {
+  background: #121214;
+  color: #eee;
 }
 
 .drop-hint {
@@ -280,3 +576,191 @@ body.is-live .preset-strip:hover {
   outline: 1px solid rgba(255, 255, 255, 0.12);
   outline-offset: -12px;
 }
+
+/* Discreet Blob VJ config panel */
+.blob-vj-panel {
+  position: absolute;
+  left: 0.85rem;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 4;
+  width: min(17.5rem, calc(100vw - 1.7rem));
+  max-height: min(78vh, 36rem);
+  overflow: auto;
+  padding: 0.7rem 0.75rem 0.65rem;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(8, 8, 10, 0.82);
+  backdrop-filter: blur(10px);
+  color: rgba(230, 230, 230, 0.88);
+  pointer-events: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+}
+
+.blob-vj-panel[hidden] {
+  display: none !important;
+}
+
+.vj-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.45rem;
+}
+
+.vj-title {
+  font-size: 0.68rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  opacity: 0.85;
+}
+
+.vj-kbd {
+  font: inherit;
+  font-size: 0.55rem;
+  letter-spacing: 0.08em;
+  padding: 0.1rem 0.28rem;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.vj-close {
+  appearance: none;
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0.1rem 0.25rem;
+}
+
+.vj-close:hover {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.vj-note {
+  margin: 0 0 0.55rem;
+  font-size: 0.58rem;
+  letter-spacing: 0.06em;
+  line-height: 1.35;
+  color: rgba(255, 200, 120, 0.65);
+}
+
+.vj-section {
+  margin-bottom: 0.55rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.vj-section:last-of-type {
+  border-bottom: 0;
+}
+
+.vj-section-title {
+  margin: 0 0 0.35rem;
+  font-size: 0.58rem;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.vj-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto auto;
+  gap: 0.08rem 0.4rem;
+  align-items: center;
+  margin-bottom: 0.28rem;
+  font-size: 0.58rem;
+  letter-spacing: 0.04em;
+}
+
+.vj-label {
+  grid-column: 1;
+  opacity: 0.7;
+}
+
+.vj-val {
+  grid-column: 2;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.45;
+  min-width: 2.2rem;
+  text-align: right;
+}
+
+.vj-row input[type='range'] {
+  grid-column: 1 / -1;
+  width: 100%;
+  height: 0.28rem;
+  appearance: none;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 0;
+  outline: none;
+  cursor: pointer;
+}
+
+.vj-row input[type='range']::-webkit-slider-thumb {
+  appearance: none;
+  width: 0.55rem;
+  height: 0.55rem;
+  background: rgba(255, 255, 255, 0.75);
+  border-radius: 0;
+  cursor: pointer;
+}
+
+.vj-row input[type='range']::-moz-range-thumb {
+  width: 0.55rem;
+  height: 0.55rem;
+  background: rgba(255, 255, 255, 0.75);
+  border: 0;
+  border-radius: 0;
+  cursor: pointer;
+}
+
+.vj-toggles {
+  display: flex;
+  flex-direction: column;
+  gap: 0.22rem;
+  margin-top: 0.25rem;
+}
+
+.vj-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.58rem;
+  letter-spacing: 0.04em;
+  opacity: 0.75;
+  cursor: pointer;
+}
+
+.vj-toggle input {
+  accent-color: rgba(200, 200, 200, 0.9);
+}
+
+.vj-foot {
+  margin-top: 0.25rem;
+}
+
+.vj-reset {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 0.55rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  padding: 0.35rem 0.55rem;
+  cursor: pointer;
+  width: 100%;
+}
+
+.vj-reset:hover {
+  color: rgba(255, 255, 255, 0.85);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+
