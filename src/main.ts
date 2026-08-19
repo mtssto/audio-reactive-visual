@@ -2,14 +2,21 @@ import * as THREE from 'three';
 import './style.css';
 import { AudioReactive } from './audio/AudioReactive';
 import {
+  BLOB_CLASSIC_SLIDERS,
   BLOB_CONFIG_DEFAULTS,
   BLOB_DETECTION_SLIDERS,
+  BLOB_HD_SLIDERS,
+  BLOB_HD_TOGGLES,
   BLOB_LENS_SLIDERS,
   BLOB_LOOK_SLIDERS,
   BLOB_LOOK_TOGGLES,
   BLOB_MATRIX_SLIDERS,
+  BLOB_TRACKING_MODES,
+  isHighDensity,
   type BlobConfig,
   type BlobConfigSlider,
+  type BlobConfigToggle,
+  type BlobTrackingMode,
 } from './core/blobConfig';
 import { HandTracker } from './core/HandTracker';
 import { PersonSegmenter } from './core/PersonSegmenter';
@@ -37,14 +44,16 @@ function sliderRows(sliders: BlobConfigSlider[], dataAttr: string): string {
     .join('');
 }
 
-function toggleRows(): string {
-  return BLOB_LOOK_TOGGLES.map(
-    (t) => `
+function toggleRows(toggles: BlobConfigToggle[]): string {
+  return toggles
+    .map(
+      (t) => `
     <label class="vj-toggle">
       <input type="checkbox" data-blob-key="${t.key}" />
       <span>${t.label}</span>
     </label>`,
-  ).join('');
+    )
+    .join('');
 }
 
 function presetHotkeyHint(p: (typeof VISUAL_PRESETS)[number], index: number): string {
@@ -91,19 +100,34 @@ app.innerHTML = `
       <button type="button" class="vj-close" aria-label="Close">×</button>
     </header>
     <section class="vj-section">
-      <h3 class="vj-section-title">Detection</h3>
+      <h3 class="vj-section-title">Tracking</h3>
+      <label class="vj-row vj-row--select">
+        <span class="vj-label">Mode</span>
+        <select data-blob-key="trackingMode">
+          ${BLOB_TRACKING_MODES.map((m) => `<option value="${m.value}">${m.label}</option>`).join('')}
+        </select>
+      </label>
       ${sliderRows(BLOB_DETECTION_SLIDERS, 'blob')}
     </section>
-    <section class="vj-section">
+    <section class="vj-section vj-classic-only">
+      <h3 class="vj-section-title">Classic detection</h3>
+      ${sliderRows(BLOB_CLASSIC_SLIDERS, 'blob')}
+    </section>
+    <section class="vj-section vj-hd-only">
+      <h3 class="vj-section-title">High density</h3>
+      <div class="vj-toggles">${toggleRows(BLOB_HD_TOGGLES)}</div>
+      ${sliderRows(BLOB_HD_SLIDERS, 'blob')}
+    </section>
+    <section class="vj-section vj-classic-only">
       <h3 class="vj-section-title">Look</h3>
       ${sliderRows(BLOB_LOOK_SLIDERS, 'blob')}
-      <div class="vj-toggles">${toggleRows()}</div>
+      <div class="vj-toggles">${toggleRows(BLOB_LOOK_TOGGLES)}</div>
     </section>
-    <section class="vj-section">
+    <section class="vj-section vj-classic-only">
       <h3 class="vj-section-title">Matrix</h3>
       ${sliderRows(BLOB_MATRIX_SLIDERS, 'blob')}
     </section>
-    <section class="vj-section">
+    <section class="vj-section vj-classic-only">
       <h3 class="vj-section-title">Lens</h3>
       ${sliderRows(BLOB_LENS_SLIDERS, 'blob')}
     </section>
@@ -477,7 +501,15 @@ function bindPointer(): void {
 }
 
 function formatVjVal(key: keyof BlobConfig, val: number): string {
-  if (Number.isInteger(val) || key === 'threshold' || key === 'minArea' || key === 'maxBlobs' || key === 'morphPasses' || key === 'matrixHue') {
+  if (
+    Number.isInteger(val) ||
+    key === 'threshold' ||
+    key === 'minArea' ||
+    key === 'classicMaxBlobs' ||
+    key === 'maxBlobs' ||
+    key === 'morphPasses' ||
+    key === 'matrixHue'
+  ) {
     return String(Math.round(val));
   }
   return val.toFixed(2);
@@ -485,9 +517,15 @@ function formatVjVal(key: keyof BlobConfig, val: number): string {
 
 function syncBlobPanelInputs(): void {
   const cfg = blobComp.cfg;
-  for (const input of blobVjPanel.querySelectorAll<HTMLInputElement>('[data-blob-key]')) {
+  blobVjPanel.classList.toggle('is-hd', isHighDensity(cfg));
+  blobVjPanel.classList.toggle('is-classic', !isHighDensity(cfg));
+  for (const input of blobVjPanel.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-blob-key]')) {
     const key = input.dataset.blobKey as keyof BlobConfig;
     const val = cfg[key];
+    if (input instanceof HTMLSelectElement) {
+      input.value = String(val);
+      continue;
+    }
     if (typeof val === 'boolean') {
       input.checked = val;
     } else if (typeof val === 'number') {
@@ -510,11 +548,13 @@ function setBlobConfigOpen(open: boolean, announce = true): void {
 
 function bindConfigPanel(): void {
   blobVjPanel.addEventListener('input', (e) => {
-    const input = e.target as HTMLInputElement;
+    const input = e.target as HTMLInputElement | HTMLSelectElement;
     const key = input.dataset.blobKey as keyof BlobConfig | undefined;
     if (!key) return;
     const next = { ...blobComp.cfg } as BlobConfig;
-    if (input.type === 'checkbox') {
+    if (input instanceof HTMLSelectElement) {
+      (next as Record<string, unknown>)[key] = input.value as BlobTrackingMode;
+    } else if (input.type === 'checkbox') {
       (next as Record<string, unknown>)[key] = input.checked;
     } else {
       const n = Number(input.value);
@@ -523,6 +563,9 @@ function bindConfigPanel(): void {
     }
     blobComp.setConfig(next);
     syncBlobPanelInputs();
+    if (key === 'trackingMode') {
+      flashPresetName(isHighDensity(next) ? 'High density' : 'Classic blobs');
+    }
   });
   blobVjPanel.querySelector('.vj-close')?.addEventListener('click', () => setBlobConfigOpen(false));
   blobVjPanel.querySelector('.vj-reset')?.addEventListener('click', () => {
@@ -818,5 +861,6 @@ resize();
 bindPointer();
 bindPresets();
 bindConfigPanel();
+syncBlobPanelInputs();
 bindDragDrop();
 startBtn.addEventListener('click', () => void start());

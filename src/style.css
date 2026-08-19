@@ -667,6 +667,39 @@ body.is-live .preset-strip:hover {
   color: rgba(255, 255, 255, 0.42);
 }
 
+.vj-row--select {
+  grid-template-rows: auto;
+}
+
+.vj-row--select select {
+  grid-column: 1 / -1;
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.88);
+  font: inherit;
+  font-size: 0.58rem;
+  letter-spacing: 0.06em;
+  padding: 0.32rem 0.4rem;
+  cursor: pointer;
+}
+
+.vj-row--select select:hover,
+.vj-row--select select:focus-visible {
+  border-color: rgba(255, 255, 255, 0.28);
+  outline: none;
+}
+
+.vj-row--select select option {
+  background: #121214;
+  color: #eee;
+}
+
+.blob-vj-panel.is-classic .vj-hd-only,
+.blob-vj-panel.is-hd .vj-classic-only {
+  display: none;
+}
+
 .vj-row {
   display: grid;
   grid-template-columns: 1fr auto;

@@ -1,5 +1,6 @@
 import type { BlobConfig } from '../core/blobConfig';
 import {
+  isHighDensity,
   loadBlobConfig,
   saveBlobConfig,
   secondaryLensZoom,
@@ -15,6 +16,9 @@ export type SmoothBlob = {
   x1: number;
   y1: number;
   area: number;
+  radius: number;
+  confidence: number;
+  featureStrength: number;
 };
 
 type FrameDest = { x: number; y: number; w: number; h: number };
@@ -54,20 +58,36 @@ export class BlobCompositor {
   }
 
   applyCfgToTracker(): void {
+    const hd = isHighDensity(this.cfg);
     this.tracker.setOptions({
       threshold: this.cfg.threshold,
       minArea: Math.round(this.cfg.minArea),
-      maxBlobs: Math.round(this.cfg.maxBlobs),
+      maxBlobs: hd ? Math.round(this.cfg.maxBlobs) : Math.round(this.cfg.classicMaxBlobs),
       morphPasses: Math.round(this.cfg.morphPasses),
       minHeight: this.cfg.minHeight,
+      highDensityTracking: hd,
+      blobDensity: this.cfg.blobDensity,
+      minBlobRadius: this.cfg.minBlobRadius,
+      maxBlobRadius: this.cfg.maxBlobRadius,
+      featureThreshold: this.cfg.featureThreshold,
+      spawnRate: this.cfg.spawnRate,
+      confidenceDecay: this.cfg.confidenceDecay,
+      mergeDistance: this.cfg.mergeDistance,
+      mergeOverlapThreshold: this.cfg.mergeOverlapThreshold,
+      minimumBlobDistance: this.cfg.minimumBlobDistance,
     });
   }
 
   setConfig(cfg: BlobConfig, persist = true): void {
-    this.cfg = cfg;
+    const modeChanged = cfg.trackingMode !== this.cfg.trackingMode;
+    this.cfg = { ...cfg, highDensityTracking: isHighDensity(cfg) };
     this.applyCfgToTracker();
+    if (modeChanged) {
+      this.tracker.reset();
+      this.smooth.clear();
+    }
     this.syncBloomCss();
-    if (persist) saveBlobConfig(cfg);
+    if (persist) saveBlobConfig(this.cfg);
   }
 
   syncBloomCss(): void {
@@ -117,7 +137,9 @@ export class BlobCompositor {
     this.drawContainVideo(video, viewW, viewH, mirror);
     this.applyBgLook();
     const smooth = this.updateSmooth(tracked, dt);
-    this.drawLenses(video, smooth, mirror);
+    if (!isHighDensity(this.cfg)) {
+      this.drawLenses(video, smooth, mirror);
+    }
     this.refreshBloomHalo(viewW, viewH);
     this.drawOverlay(smooth);
     return smooth;
@@ -183,6 +205,9 @@ export class BlobCompositor {
           x1: b.x1,
           y1: b.y1,
           area: b.area,
+          radius: b.radius,
+          confidence: b.confidence,
+          featureStrength: b.featureStrength,
         });
       } else {
         prev.x += (b.x - prev.x) * rate;
@@ -192,10 +217,16 @@ export class BlobCompositor {
         prev.x1 += (b.x1 - prev.x1) * rate;
         prev.y1 += (b.y1 - prev.y1) * rate;
         prev.area += (b.area - prev.area) * rate;
+        prev.radius += (b.radius - prev.radius) * rate;
+        prev.confidence += (b.confidence - prev.confidence) * rate;
+        prev.featureStrength += (b.featureStrength - prev.featureStrength) * rate;
       }
     }
     for (const id of [...this.smooth.keys()]) {
       if (!seen.has(id)) this.smooth.delete(id);
+    }
+    if (isHighDensity(this.cfg)) {
+      return [...this.smooth.values()];
     }
     return [...this.smooth.values()].sort((a, b) => b.area - a.area);
   }
@@ -267,6 +298,11 @@ export class BlobCompositor {
     this.overlayCtx.clearRect(0, 0, viewW, viewH);
     if (smooth.length === 0) return;
 
+    if (isHighDensity(this.cfg)) {
+      this.drawHighDensityOverlay(smooth);
+      return;
+    }
+
     // Constellation lines
     this.overlayCtx.strokeStyle = 'rgba(255, 255, 255, 0.55)';
     this.overlayCtx.lineWidth = 1.25;
@@ -308,6 +344,47 @@ export class BlobCompositor {
         this.overlayCtx.fillStyle = 'rgba(57,255,106,0.9)';
         this.overlayCtx.fillText(String(b.id), r.x + 3, Math.max(12, r.y - 4));
       }
+    }
+  }
+
+  private drawHighDensityOverlay(smooth: SmoothBlob[]): void {
+    const ctx = this.overlayCtx;
+    const { x: fx, y: fy, w: fw, h: fh } = this.frameDest;
+    const debug = this.cfg.debugHighDensityTracking;
+    const showIds = this.cfg.debugShowIds;
+    const n = smooth.length;
+    const drawRings = debug && n <= 1400;
+
+    ctx.lineWidth = 1;
+    for (let i = 0; i < n; i++) {
+      const b = smooth[i]!;
+      const cx = fx + b.x * fw;
+      const cy = fy + b.y * fh;
+      const a = 0.25 + 0.75 * Math.min(1, Math.max(0, b.confidence));
+      const fs = Math.min(1, Math.max(0, b.featureStrength));
+      const g = Math.round(180 + fs * 75);
+      ctx.fillStyle = `rgba(${g},${g},${g},${a})`;
+      ctx.fillRect(cx - 1, cy - 1, 2, 2);
+
+      if (drawRings) {
+        const rr = Math.max(1.2, 0.5 * (b.x1 - b.x0) * fw);
+        ctx.strokeStyle = `rgba(255,255,255,${0.18 + a * 0.22})`;
+        ctx.beginPath();
+        ctx.arc(cx, cy, rr, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+
+    if (!debug || !showIds) return;
+    ctx.font = '7px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+    ctx.fillStyle = 'rgba(255,255,255,0.88)';
+    ctx.textBaseline = 'bottom';
+    const limit = Math.min(n, 900);
+    for (let i = 0; i < limit; i++) {
+      const b = smooth[i]!;
+      const cx = fx + b.x * fw;
+      const cy = fy + b.y * fh;
+      ctx.fillText(String(b.id), cx + 2, cy - 1);
     }
   }
 
